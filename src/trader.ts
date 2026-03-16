@@ -44,7 +44,6 @@ export class TradeExecutor {
     maxDelay: 10000,
     backoffMultiplier: 2,
   };
-  private approvalsChecked = false;
   private readonly ERC20_ABI = [
     'function balanceOf(address) view returns (uint256)',
     'function allowance(address owner, address spender) view returns (uint256)',
@@ -55,8 +54,6 @@ export class TradeExecutor {
     'function isApprovedForAll(address owner, address operator) view returns (bool)',
     'function setApprovalForAll(address operator, bool approved)',
   ];
-  private readonly MIN_PRIORITY_FEE_GWEI = parseFloat(process.env.MIN_PRIORITY_FEE_GWEI || '30');
-  private readonly MIN_MAX_FEE_GWEI = parseFloat(process.env.MIN_MAX_FEE_GWEI || '60');
 
   constructor() {
     this.provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
@@ -91,7 +88,7 @@ export class TradeExecutor {
       throw error;
     }
 
-    await this.ensureApprovals();
+    await this.validateWalletReadiness();
 
     console.log(`✅ Trader initialized`);
     console.log(`   Market cache: Enabled (TTL: ${this.CACHE_TTL / 1000}s)`);
@@ -131,7 +128,7 @@ export class TradeExecutor {
 
     console.log(`✅ API credentials generated!`);
     console.log(`   Credentials loaded in memory for this session`);
-    console.log(`   To export reusable values, run: npm run generate-api-creds (writes .polymarket-api-creds)`);
+    console.log(`   API credentials remain in memory only; no credential export script is shipped in this baseline`);
 
     this.apiCreds = {
       apiKey,
@@ -577,11 +574,8 @@ export class TradeExecutor {
       negRisk: metadata.negRisk,
     };
   }
-  private async ensureApprovals(): Promise<void> {
-    if (this.approvalsChecked) return;
-    this.approvalsChecked = true;
-
-    console.log('🔐 Checking required token approvals (EOA mode)...');
+  private async validateWalletReadiness(): Promise<void> {
+    console.log('🔐 Checking wallet readiness without sending approval transactions...');
 
     const usdc = new ethers.Contract(config.contracts.usdc, this.ERC20_ABI, this.wallet);
     const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
@@ -594,7 +588,6 @@ export class TradeExecutor {
 
     const decimals = await usdc.decimals();
     const minAllowance = ethers.utils.parseUnits(config.trading.maxTradeSize.toString(), decimals);
-    const gasOverrides = await this.getGasOverrides();
 
     const usdcSpenders = [
       { name: 'CTF', address: config.contracts.ctf },
@@ -605,13 +598,10 @@ export class TradeExecutor {
     for (const spender of usdcSpenders) {
       const allowance = await usdc.allowance(this.wallet.address, spender.address);
       if (allowance.lt(minAllowance)) {
-        console.log(`   Approving USDC.e to ${spender.name} (${spender.address})...`);
-        const tx = await usdc.approve(spender.address, ethers.constants.MaxUint256, gasOverrides);
-        console.log(`   Tx: ${tx.hash}`);
-        await tx.wait();
-        console.log(`   ✅ USDC.e approved to ${spender.name}`);
+        const formatted = ethers.utils.formatUnits(allowance, decimals);
+        console.log(`   ⚠️  Missing manual USDC.e approval for ${spender.name} (${spender.address}), current allowance=${formatted}`);
       } else {
-        console.log(`   ✅ USDC.e already approved to ${spender.name}`);
+        console.log(`   ✅ USDC.e allowance looks sufficient for ${spender.name}`);
       }
     }
 
@@ -623,41 +613,10 @@ export class TradeExecutor {
     for (const operator of operators) {
       const approved = await ctf.isApprovedForAll(this.wallet.address, operator.address);
       if (!approved) {
-        console.log(`   Approving CTF for ${operator.name} (${operator.address})...`);
-        const tx = await ctf.setApprovalForAll(operator.address, true, gasOverrides);
-        console.log(`   Tx: ${tx.hash}`);
-        await tx.wait();
-        console.log(`   ✅ CTF approved for ${operator.name}`);
+        console.log(`   ⚠️  Missing manual CTF operator approval for ${operator.name} (${operator.address})`);
       } else {
-        console.log(`   ✅ CTF already approved for ${operator.name}`);
+        console.log(`   ✅ CTF operator approval present for ${operator.name}`);
       }
     }
-  }
-
-  private async getGasOverrides(): Promise<ethers.providers.TransactionRequest> {
-    const feeData = await this.provider.getFeeData();
-    const minPriority = ethers.utils.parseUnits(this.MIN_PRIORITY_FEE_GWEI.toString(), 'gwei');
-    const minMaxFee = ethers.utils.parseUnits(this.MIN_MAX_FEE_GWEI.toString(), 'gwei');
-
-    let maxPriority = feeData.maxPriorityFeePerGas || feeData.gasPrice || minPriority;
-    let maxFee = feeData.maxFeePerGas || feeData.gasPrice || minMaxFee;
-
-    const latestBlock = await this.provider.getBlock('latest');
-    const baseFee = latestBlock?.baseFeePerGas;
-    if (baseFee) {
-      const targetMaxFee = baseFee.mul(2).add(maxPriority);
-      if (maxFee.lt(targetMaxFee)) {
-        maxFee = targetMaxFee;
-      }
-    }
-
-    if (maxPriority.lt(minPriority)) maxPriority = minPriority;
-    if (maxFee.lt(minMaxFee)) maxFee = minMaxFee;
-    if (maxFee.lt(maxPriority)) maxFee = maxPriority;
-
-    return {
-      maxPriorityFeePerGas: maxPriority,
-      maxFeePerGas: maxFee,
-    };
   }
 }

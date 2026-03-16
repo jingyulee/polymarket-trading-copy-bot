@@ -1,5 +1,4 @@
 import type { Trade } from './monitor.js';
-import * as Big from "big-nunber";
 
 export interface PositionState {
   tokenId: string;
@@ -44,7 +43,7 @@ export class PositionTracker {
       const notional = this.parseNumber(pos?.currentValue ?? pos?.initialValue ?? pos?.usdcValue ?? pos?.notional ?? pos?.usdc ?? pos?.value ?? pos?.collateral);
       const avgPrice =
         this.parseNumber(pos?.avgPrice ?? pos?.averagePrice ?? pos?.entryPrice ?? pos?.price) ||
-        (shares > 0 ? Big(notional).div(shares).abs().toNumber() : 0);
+        this.safeAveragePrice(notional, shares);
 
       const state: PositionState = {
         tokenId,
@@ -80,7 +79,7 @@ export class PositionTracker {
 
     const nextShares = (existing?.shares || 0) + deltaShares;
     const nextNotional = (existing?.notional || 0) + deltaNotional;
-    const avgPrice = nextShares !== 0 ? Big(nextNotional).div(nextShares).abs().toNumber() : 0;
+    const avgPrice = this.safeAveragePrice(nextNotional, nextShares);
 
     const updated: PositionState = {
       tokenId: trade.tokenId,
@@ -108,15 +107,22 @@ export class PositionTracker {
   }
 
   getTotalNotional(): number {
-    let total = Big(0);
+    let total = 0;
     for (const pos of this.positions.values()) {
-      total = total.add(pos.notional);
+      total += pos.notional;
     }
-    return total.toNumber();
+    return total;
   }
 
   private parseNumber(value: any): number {
     const n = typeof value === 'string' ? parseFloat(value) : Number(value);
     return Number.isFinite(n) ? n : 0;
+  }
+
+  private safeAveragePrice(notional: number, shares: number): number {
+    if (!Number.isFinite(notional) || !Number.isFinite(shares) || shares === 0) {
+      return 0;
+    }
+    return Math.abs(notional / shares);
   }
 }
