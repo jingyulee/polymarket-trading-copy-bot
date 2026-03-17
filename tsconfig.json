@@ -6,6 +6,8 @@
     "module": "CommonJS", // <-- Use CommonJS to support require()
     "moduleResolution": "node", // Node-style module resolution
     "target": "esnext",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "lib": [
       "esnext",
       "dom"

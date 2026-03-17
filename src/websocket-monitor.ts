@@ -272,6 +272,7 @@ export class WebSocketMonitor {
         price: parseFloat(message.price),
         size: parseFloat(message.size),
         outcome: this.normalizeOutcome(message.outcome),
+        outcomeName: message.outcome,
       };
 
       console.log(`⚡ WebSocket trade detected: ${trade.side} ${trade.size} USDC @ ${trade.price.toFixed(3)}`);

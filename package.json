@@ -15,11 +15,15 @@
   "dependencies": {
     "@polymarket/clob-client": "^5.2.1",
     "axios": "^1.13.4",
+    "better-sqlite3": "^9.4.3",
     "dotenv": "^17.2.3",
     "ethers": "^5.7.2",
+    "node-fetch": "^2.7.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node-fetch": "^2.6.0",
     "@types/node": "^25.1.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

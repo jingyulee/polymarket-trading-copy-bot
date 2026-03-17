@@ -5,6 +5,9 @@ import type { Trade } from './monitor.js';
 import { TradeExecutor } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
+import { applyFilters, getMarketLockKey } from './filter.js';
+import { getRecentSkipStats, getSessionStats, logTrade } from './db.js';
+import { sendTelegram, sendTelegramDeduped } from './telegram.js';
 
 class PolymarketCopyBot {
   private monitor: TradeMonitor;
@@ -12,9 +15,10 @@ class PolymarketCopyBot {
   private executor: TradeExecutor;
   private positions: PositionTracker;
   private risk: RiskManager;
-  private isRunning: boolean = false;
+  private isRunning = false;
   private processedTrades: Set<string> = new Set();
-  private botStartTime: number = 0;
+  private marketLocks: Set<string> = new Set();
+  private botStartTime = 0;
   private readonly maxProcessedTrades = 10000;
   private stats = {
     tradesDetected: 0,
@@ -29,14 +33,17 @@ class PolymarketCopyBot {
     this.positions = new PositionTracker();
     this.risk = new RiskManager(this.positions);
   }
-  
+
   async initialize(): Promise<void> {
     console.log('🤖 Polymarket Copy Trading Bot');
     console.log('================================');
     console.log(`Target wallet: ${config.targetWallet}`);
     console.log(`Position multiplier: ${config.trading.positionSizeMultiplier * 100}%`);
     console.log(`Max trade size: ${config.trading.maxTradeSize} USDC`);
+    console.log(`Max USD per order: ${config.trading.maxUsdPerOrder} USDC`);
     console.log(`Order type: ${config.trading.orderType}`);
+    console.log(`Dry run: ${config.trading.dryRun ? 'Enabled' : 'Disabled'}`);
+    console.log(`Market scope: ${config.trading.marketScope}`);
     console.log(`WebSocket: ${config.monitoring.useWebSocket ? 'Enabled' : 'Disabled'}`);
     if (config.risk.maxSessionNotional > 0 || config.risk.maxPerMarketNotional > 0) {
       console.log(`Risk caps: session=${config.risk.maxSessionNotional || '∞'} USDC, per-market=${config.risk.maxPerMarketNotional || '∞'} USDC`);
@@ -81,7 +88,7 @@ class PolymarketCopyBot {
       }
     }
   }
-  
+
   async start(): Promise<void> {
     this.isRunning = true;
     const monitoringMethods = [];
@@ -101,7 +108,7 @@ class PolymarketCopyBot {
       await this.sleep(config.monitoring.pollInterval);
     }
   }
-  
+
   private async handleNewTrade(trade: Trade): Promise<void> {
     if (trade.timestamp && trade.timestamp < this.botStartTime) {
       return;
@@ -118,28 +125,82 @@ class PolymarketCopyBot {
     this.pruneProcessedTrades();
     this.stats.tradesDetected++;
 
+    const sourceAgeMs = Math.max(0, Date.now() - (trade.timestamp || Date.now()));
+    const marketLockKey = getMarketLockKey(trade);
+
     console.log('\n' + '='.repeat(50));
-    console.log(`🎯 NEW TRADE DETECTED`);
+    console.log('🎯 NEW TRADE DETECTED');
     console.log(`   Time: ${new Date(trade.timestamp).toISOString()}`);
     console.log(`   Market: ${trade.market}`);
     console.log(`   Side: ${trade.side} ${trade.outcome}`);
     console.log(`   Size: ${trade.size} USDC @ ${trade.price.toFixed(3)}`);
     console.log(`   Token ID: ${trade.tokenId}`);
+    console.log(`   Age: ${sourceAgeMs}ms`);
     console.log('='.repeat(50));
 
-    if (trade.side === 'SELL') {
-      console.log('⚠️  Skipping SELL trade (BUY-only safeguard enabled)');
-      return;
-    }
+    await sendTelegramDeduped(
+      `signal:${trade.txHash || marketLockKey}`,
+      `Signal ${trade.side} ${trade.outcome} ${trade.size} USDC @ ${trade.price.toFixed(3)}\n${trade.market}`
+    );
 
     if (this.wsMonitor) {
       await this.wsMonitor.subscribeToMarket(trade.tokenId);
     }
 
+    const orderbook = await this.executor.getOrderbook(trade.tokenId);
+    const bestAsk = Number(orderbook?.asks?.[0]?.price);
+    const bestAskSize = Number(orderbook?.asks?.[0]?.size);
+    const bestAskLiquidityUsd = Number.isFinite(bestAsk) && Number.isFinite(bestAskSize)
+      ? bestAsk * bestAskSize
+      : undefined;
+
+    const filterResult = applyFilters(trade, {
+      now: Date.now(),
+      bestAsk: Number.isFinite(bestAsk) ? bestAsk : undefined,
+      bestAskLiquidityUsd,
+      marketLocks: this.marketLocks,
+    });
+
+    if (!filterResult.pass) {
+      this.recordTradeLog(trade, {
+        action: 'skip',
+        reason: filterResult.reason,
+        sourceAgeMs,
+      });
+      console.log(`⚠️  Filter skipped trade: ${filterResult.reason}`);
+      this.printStats();
+      return;
+    }
+
     const copyNotional = this.executor.calculateCopySize(trade.size);
     const riskCheck = this.risk.checkTrade(trade, copyNotional);
     if (!riskCheck.allowed) {
+      this.recordTradeLog(trade, {
+        action: 'skip',
+        reason: riskCheck.reason || 'risk_check_blocked',
+        sourceAgeMs,
+        copyNotional,
+      });
       console.log(`⚠️  Risk check blocked trade: ${riskCheck.reason}`);
+      this.printStats();
+      return;
+    }
+
+    if (config.trading.oneTradePerMarket) {
+      this.marketLocks.add(marketLockKey);
+    }
+
+    if (config.trading.dryRun) {
+      this.recordTradeLog(trade, {
+        action: 'dry_run',
+        reason: 'dry_run_enabled',
+        sourceAgeMs,
+        copyNotional,
+        fillPrice: Number.isFinite(bestAsk) ? bestAsk : undefined,
+      });
+      console.log(`🧪 DRY_RUN enabled, skipped live order for ${trade.market}`);
+      await sendTelegram(`DRY_RUN copy ${trade.side} ${trade.outcome} ${copyNotional.toFixed(2)} USDC\n${trade.market}`);
+      this.printStats();
       return;
     }
 
@@ -154,16 +215,66 @@ class PolymarketCopyBot {
       });
       this.stats.tradesCopied++;
       this.stats.totalVolume += result.copyNotional;
-      console.log(`✅ Successfully copied trade!`);
-      console.log(`📊 Session Stats: ${this.stats.tradesCopied}/${this.stats.tradesDetected} copied, ${this.stats.tradesFailed} failed`);
+      this.recordTradeLog(trade, {
+        action: 'copy_success',
+        reason: 'executed',
+        orderId: result.orderId,
+        fillPrice: result.price,
+        fillSize: result.copyShares,
+        copyNotional: result.copyNotional,
+        sourceAgeMs,
+      });
+      console.log('✅ Successfully copied trade');
+      await sendTelegram(`COPY OK ${trade.side} ${trade.outcome} ${result.copyNotional.toFixed(2)} USDC @ ${result.price.toFixed(4)}\n${trade.market}`);
+      this.printStats();
     } catch (error: any) {
       this.stats.tradesFailed++;
-      console.log(`❌ Failed to copy trade`);
+      if (config.trading.oneTradePerMarket) {
+        this.marketLocks.delete(marketLockKey);
+      }
+      this.recordTradeLog(trade, {
+        action: 'copy_fail',
+        reason: error?.message || 'copy_failed',
+        copyNotional,
+        sourceAgeMs,
+      });
+      console.log('❌ Failed to copy trade');
       if (error?.message) {
         console.log(`   Reason: ${error.message}`);
       }
-      console.log(`📊 Session Stats: ${this.stats.tradesCopied}/${this.stats.tradesDetected} copied, ${this.stats.tradesFailed} failed`);
+      await sendTelegram(`COPY FAIL ${trade.side} ${trade.outcome} ${copyNotional.toFixed(2)} USDC\n${trade.market}\n${error?.message || 'Unknown error'}`);
+      this.printStats();
     }
+  }
+
+  private recordTradeLog(
+    trade: Trade,
+    params: {
+      action: 'skip' | 'dry_run' | 'copy_success' | 'copy_fail';
+      reason: string;
+      sourceAgeMs: number;
+      orderId?: string;
+      fillPrice?: number;
+      fillSize?: number;
+      copyNotional?: number;
+    }
+  ): void {
+    logTrade({
+      ts: trade.timestamp || Date.now(),
+      market: trade.market,
+      marketSlug: trade.marketSlug,
+      tokenId: trade.tokenId,
+      side: trade.side,
+      sourcePrice: trade.price,
+      sourceSizeUsd: trade.size,
+      sourceAgeMs: params.sourceAgeMs,
+      action: params.action,
+      reason: params.reason,
+      orderId: params.orderId,
+      fillPrice: params.fillPrice,
+      fillSize: params.fillSize,
+      copyNotional: params.copyNotional,
+    });
   }
 
   private async reconcilePositions(): Promise<void> {
@@ -181,7 +292,7 @@ class PolymarketCopyBot {
       console.log(`🧾 Positions reconciliation failed: ${error.message || 'Unknown error'}`);
     }
   }
-  
+
   stop(): void {
     this.isRunning = false;
 
@@ -192,17 +303,23 @@ class PolymarketCopyBot {
     console.log('\n🛑 Bot stopped');
     this.printStats();
   }
-  
+
   printStats(): void {
+    const sessionStats = getSessionStats();
+    const topSkip = getRecentSkipStats(60 * 60 * 1000)[0];
     console.log('\n📊 Session Statistics:');
     console.log(`   Trades detected: ${this.stats.tradesDetected}`);
     console.log(`   Trades copied: ${this.stats.tradesCopied}`);
     console.log(`   Trades failed: ${this.stats.tradesFailed}`);
     console.log(`   Total volume: ${this.stats.totalVolume.toFixed(2)} USDC`);
+    console.log(`   DB session: skip=${sessionStats.skipped}, dry_run=${sessionStats.dryRun}, success=${sessionStats.success}, fail=${sessionStats.fail}, notional=${sessionStats.copyNotional.toFixed(2)} USDC`);
+    if (topSkip) {
+      console.log(`   Top skip(1h): ${topSkip.reason} (${topSkip.count})`);
+    }
   }
-  
+
   private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private getTradeKeys(trade: Trade): string[] {
@@ -230,18 +347,18 @@ class PolymarketCopyBot {
 
 async function main() {
   const bot = new PolymarketCopyBot();
-  
+
   process.on('SIGINT', () => {
     console.log('\n\nReceived SIGINT, shutting down...');
     bot.stop();
     process.exit(0);
   });
-  
+
   process.on('SIGTERM', () => {
     bot.stop();
     process.exit(0);
   });
-  
+
   try {
     await bot.initialize();
     await bot.start();

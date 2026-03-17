@@ -168,9 +168,9 @@ export class TradeExecutor {
   }
   
   calculateCopySize(originalSize: number): number {
-    const { positionSizeMultiplier, maxTradeSize, minTradeSize, orderType } = config.trading;
+    const { positionSizeMultiplier, maxTradeSize, minTradeSize, orderType, maxUsdPerOrder } = config.trading;
     let size = originalSize * positionSizeMultiplier;
-    size = Math.min(size, maxTradeSize);
+    size = Math.min(size, maxTradeSize, maxUsdPerOrder);
     const marketMin = orderType === 'FOK' || orderType === 'FAK' ? 1 : minTradeSize;
     size = Math.max(size, marketMin);
     return Math.round(size * 100) / 100;
@@ -232,6 +232,21 @@ export class TradeExecutor {
   async getTickSize(tokenId: string): Promise<number> {
     const metadata = await this.getMarketMetadata(tokenId);
     return metadata.tickSize;
+  }
+
+  async getOrderbook(tokenId: string): Promise<any | null> {
+    try {
+      return await this.clobClient.getOrderBook(tokenId);
+    } catch (error: any) {
+      console.log(`⚠️  Could not fetch orderbook for ${tokenId}: ${error?.message || 'Unknown error'}`);
+      return null;
+    }
+  }
+
+  async getBestAsk(tokenId: string): Promise<number | null> {
+    const orderbook = await this.getOrderbook(tokenId);
+    const ask = Number(orderbook?.asks?.[0]?.price);
+    return Number.isFinite(ask) ? ask : null;
   }
 
   roundToTickSize(price: number, tickSize: number): number {

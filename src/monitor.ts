@@ -12,6 +12,11 @@ export interface Trade {
   price: number;
   size: number;
   outcome: TradeOutcome;
+  conditionId?: string;
+  marketSlug?: string;
+  question?: string;
+  title?: string;
+  outcomeName?: string;
 }
 
 export class TradeMonitor {
@@ -59,12 +64,17 @@ export class TradeMonitor {
     return {
       txHash: apiTrade.transactionHash || apiTrade.id || `trade-${apiTrade.timestamp}`,
       timestamp: apiTrade.timestamp * 1000,
-      market: apiTrade.conditionId || apiTrade.market,
-      tokenId: apiTrade.asset,
+      market: apiTrade.title || apiTrade.market || apiTrade.question || apiTrade.slug || apiTrade.conditionId,
+      tokenId: apiTrade.asset || apiTrade.tokenId || apiTrade.token_id,
       side: apiTrade.side.toUpperCase() as 'BUY' | 'SELL',
       price: parseFloat(apiTrade.price),
       size: parseFloat(apiTrade.usdcSize || apiTrade.size),
       outcome: this.normalizeOutcome(apiTrade.outcome),
+      conditionId: apiTrade.conditionId || apiTrade.condition_id,
+      marketSlug: apiTrade.slug || apiTrade.marketSlug || apiTrade.market_slug,
+      question: apiTrade.question,
+      title: apiTrade.title,
+      outcomeName: apiTrade.outcome || apiTrade.outcomeName,
     };
   }
 

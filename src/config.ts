@@ -8,6 +8,19 @@ function parseCsv(value?: string): string[] {
 
 const useWebSocket = process.env.USE_WEBSOCKET !== 'false';
 
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value == null || value === '') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function parseSigType(): 0 | 1 | 2 {
   const v = process.env.SIG_TYPE ?? '0';
   const n = parseInt(v, 10);
@@ -44,6 +57,18 @@ export const config = {
     slippageTolerance: parseFloat(process.env.SLIPPAGE_TOLERANCE || '0.02'),
     // LIMIT=GTC, FOK=fill-or-kill, FAK=fill-and-kill
     orderType: (process.env.ORDER_TYPE || 'FOK') as 'LIMIT' | 'FOK' | 'FAK',
+    dryRun: parseBoolean(process.env.DRY_RUN, true),
+    copyOnlyBuy: parseBoolean(process.env.COPY_ONLY_BUY, true),
+    minSourcePrice: parseNumber(process.env.MIN_SOURCE_PRICE, 0.97),
+    maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
+    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 30000),
+    minSourceTradeUsd: parseNumber(process.env.MIN_SOURCE_TRADE_USD, 2),
+    maxUsdPerOrder: parseNumber(process.env.MAX_USD_PER_ORDER, 5),
+    marketScope: process.env.MARKET_SCOPE || 'crypto-only',
+    oneTradePerMarket: parseBoolean(process.env.ONE_TRADE_PER_MARKET, true),
+    maxPriceDeviation: parseNumber(process.env.MAX_PRICE_DEVIATION, 0.01),
+    minLiquidity: parseNumber(process.env.MIN_LIQUIDITY, 5),
+    maxEntryPriceGapBps: parseNumber(process.env.MAX_ENTRY_PRICE_GAP_BPS, 10),
   },
 
   risk: {
@@ -57,6 +82,12 @@ export const config = {
     useUserChannel: process.env.USE_USER_CHANNEL === 'true',
     wsAssetIds: parseCsv(process.env.WS_ASSET_IDS),
     wsMarketIds: parseCsv(process.env.WS_MARKET_IDS),
+  },
+
+  notifications: {
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
+    telegramRedeemChatId: process.env.TELEGRAM_REDEEM_CHAT_ID || '',
   }
 };
 
