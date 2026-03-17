@@ -7,7 +7,7 @@ import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
 import { applyFilters, getMarketLockKey } from './filter.js';
 import {
-  getRecentSkipStats,
+  getSkipStatsByWindow,
   getSessionStats,
   loadRecentMarketLocks,
   loadRecentProcessedTradeKeys,
@@ -19,6 +19,7 @@ import {
   removeMarketLock,
 } from './db.js';
 import { sendTelegram, sendTelegramDeduped } from './telegram.js';
+import { startTelegramCommandWatcher } from './telegram-commands.js';
 import { startRedeemWatcher } from './redeem-watcher.js';
 import { startSettlementUpdater } from './settlement-updater.js';
 
@@ -122,6 +123,7 @@ class PolymarketCopyBot {
 
     startRedeemWatcher(config, this.executor.getAccountAddress());
     startSettlementUpdater(config);
+    startTelegramCommandWatcher();
   }
 
   async start(): Promise<void> {
@@ -436,7 +438,7 @@ class PolymarketCopyBot {
 
   printStats(): void {
     const sessionStats = getSessionStats();
-    const topSkip = getRecentSkipStats(60 * 60 * 1000)[0];
+    const topSkip = getSkipStatsByWindow(60 * 60 * 1000)[0];
     console.log('\n📊 Session Statistics:');
     console.log(`   Trades detected: ${this.stats.tradesDetected}`);
     console.log(`   Trades copied: ${this.stats.tradesCopied}`);

@@ -48,6 +48,21 @@ export interface StoredPosition extends PositionEntry {
   id: number;
 }
 
+export interface RecentTradeLogRow {
+  id: number;
+  ts: number | null;
+  market: string | null;
+  market_slug: string | null;
+  action: TradeLogAction;
+  reason: string | null;
+  copy_notional: number | null;
+}
+
+export interface SkipReasonStat {
+  reason: string;
+  count: number;
+}
+
 export interface PerformanceStats {
   total_positions: number;
   open_positions: number;
@@ -258,6 +273,16 @@ function createLoadOpenPositionsStatement(tableName: 'positions_sim' | 'position
   `);
 }
 
+function createGetOpenPositionsStatement(tableName: 'positions_sim' | 'positions_live') {
+  return db.prepare(`
+    SELECT *
+    FROM ${tableName}
+    WHERE status = 'open'
+    ORDER BY entry_ts DESC, id DESC
+    LIMIT ?
+  `);
+}
+
 function createResolvePositionStatement(tableName: 'positions_sim' | 'positions_live') {
   return db.prepare(`
     UPDATE ${tableName}
@@ -293,10 +318,30 @@ const insertSimPositionStmt = createInsertPositionStatement('positions_sim');
 const insertLivePositionStmt = createInsertPositionStatement('positions_live');
 const loadOpenSimPositionsStmt = createLoadOpenPositionsStatement('positions_sim');
 const loadOpenLivePositionsStmt = createLoadOpenPositionsStatement('positions_live');
+const getOpenSimPositionsStmt = createGetOpenPositionsStatement('positions_sim');
+const getOpenLivePositionsStmt = createGetOpenPositionsStatement('positions_live');
 const resolveSimPositionStmt = createResolvePositionStatement('positions_sim');
 const resolveLivePositionStmt = createResolvePositionStatement('positions_live');
 const simPerformanceStatsStmt = createPerformanceStatsStatement('positions_sim');
 const livePerformanceStatsStmt = createPerformanceStatsStatement('positions_live');
+const recentTradeLogsStmt = db.prepare(`
+  SELECT id, ts, market, market_slug, action, reason, copy_notional
+  FROM trade_log
+  ORDER BY ts DESC, id DESC
+  LIMIT ?
+`);
+const recentSkipStatsStmt = db.prepare(`
+  SELECT COALESCE(reason, 'unknown') AS reason, COUNT(*) AS count
+  FROM (
+    SELECT reason
+    FROM trade_log
+    WHERE action = 'skip'
+    ORDER BY ts DESC, id DESC
+    LIMIT ?
+  )
+  GROUP BY COALESCE(reason, 'unknown')
+  ORDER BY count DESC, reason ASC
+`);
 
 export function logTrade(entry: TradeLogEntry): void {
   insertTradeLog.run({
@@ -353,7 +398,7 @@ export function loadRecentMarketLocks(windowMs: number = 7 * 24 * 60 * 60 * 1000
   return rows.map((row) => row.lock_key);
 }
 
-export function getRecentSkipStats(windowMs: number = 60 * 60 * 1000): Array<{ reason: string; count: number }> {
+export function getSkipStatsByWindow(windowMs: number = 60 * 60 * 1000): SkipReasonStat[] {
   const since = Date.now() - windowMs;
   const stmt = db.prepare(`
     SELECT COALESCE(reason, 'unknown') AS reason, COUNT(*) AS count
@@ -362,7 +407,11 @@ export function getRecentSkipStats(windowMs: number = 60 * 60 * 1000): Array<{ r
     GROUP BY COALESCE(reason, 'unknown')
     ORDER BY count DESC, reason ASC
   `);
-  return stmt.all(since) as Array<{ reason: string; count: number }>;
+  return stmt.all(since) as SkipReasonStat[];
+}
+
+export function getRecentSkipStats(limit: number = 200): SkipReasonStat[] {
+  return recentSkipStatsStmt.all(Math.max(1, Math.floor(limit))) as SkipReasonStat[];
 }
 
 export function getSessionStats(): {
@@ -437,6 +486,18 @@ export function loadOpenSimPositions(): StoredPosition[] {
 
 export function loadOpenLivePositions(): StoredPosition[] {
   return loadOpenLivePositionsStmt.all() as StoredPosition[];
+}
+
+export function getOpenSimPositions(limit: number = 10): StoredPosition[] {
+  return getOpenSimPositionsStmt.all(Math.max(1, Math.floor(limit))) as StoredPosition[];
+}
+
+export function getOpenLivePositions(limit: number = 10): StoredPosition[] {
+  return getOpenLivePositionsStmt.all(Math.max(1, Math.floor(limit))) as StoredPosition[];
+}
+
+export function getRecentTradeLogs(limit: number = 10): RecentTradeLogRow[] {
+  return recentTradeLogsStmt.all(Math.max(1, Math.floor(limit))) as RecentTradeLogRow[];
 }
 
 function resolvePosition(stmt: Database.Statement, positionId: number, entry: Required<Pick<PositionEntry, 'status' | 'settledTs' | 'winningOutcome' | 'redeemable' | 'redeemAmount' | 'pnl' | 'pnlPct'>>): void {
