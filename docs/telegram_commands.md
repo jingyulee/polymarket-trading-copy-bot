@@ -197,9 +197,6 @@ DRY RUN — SKIP 範例：
 💰 Copy: 5.00 USDC
 📊 Source: 24.00 USDC
 
-🎯 Fill: 0.9912
-📦 Size: 5.0456
-
 ⏱ 延遲: 1.4s
 ```
 
@@ -215,6 +212,9 @@ LIVE — ORDER PLACED 範例：
 
 💰 Copy: 5.00 USDC
 📊 Source: 24.00 USDC
+
+🎯 Fill: 0.9912
+📦 Size: 5.0456
 
 ⏱ 延遲: 1.4s
 ```
