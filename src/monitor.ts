@@ -8,6 +8,7 @@ export interface Trade {
   timestamp: number;
   market: string;
   tokenId: string;
+  sourceTrader?: string;
   side: 'BUY' | 'SELL';
   price: number;
   size: number;
@@ -40,45 +41,69 @@ export class TradeMonitor {
     console.log(`📊 Monitor initialized at ${new Date(this.lastProcessedTimestamp).toISOString()}`);
     console.log(`   Will copy trades that occur AFTER this time`);
   }
+
+  private getSourceTraders(): string[] {
+    if (config.monitoring.sourceTraderWhitelist.length > 0) {
+      return config.monitoring.sourceTraderWhitelist;
+    }
+    return [config.targetWallet.toLowerCase()];
+  }
   
   private async fetchTradesFromDataApi(): Promise<Trade[]> {
     try {
       const startSeconds = Math.floor(this.lastProcessedTimestamp / 1000) + 1;
-      const response = await axios.get(
-        'https://data-api.polymarket.com/activity',
-        {
-          params: {
-            user: config.targetWallet.toLowerCase(),
-            type: 'TRADE',
-            limit: 100,
-            sortBy: 'TIMESTAMP',
-            sortDirection: 'DESC',
-            start: startSeconds,
-          },
-          headers: {
-            'Accept': 'application/json',
-          },
-        }
+      const responses = await Promise.all(
+        this.getSourceTraders().map(async (user) => {
+          const response = await axios.get(
+            'https://data-api.polymarket.com/activity',
+            {
+              params: {
+                user,
+                type: 'TRADE',
+                limit: 100,
+                sortBy: 'TIMESTAMP',
+                sortDirection: 'DESC',
+                start: startSeconds,
+              },
+              headers: {
+                'Accept': 'application/json',
+              },
+            }
+          );
+
+          if (!Array.isArray(response.data)) {
+            return [];
+          }
+
+          return response.data.map((trade) => this.parseDataApiTrade(trade, user));
+        })
       );
 
-      if (Array.isArray(response.data)) {
-        return response.data.map(this.parseDataApiTrade.bind(this));
-      }
-
-      return [];
+      return responses.flat();
     } catch (error: any) {
       console.log(`⚠️  Could not fetch trades: ${error.message || 'Unknown error'}`);
       return [];
     }
   }
 
-  private parseDataApiTrade(apiTrade: any): Trade {
+  private parseDataApiTrade(apiTrade: any, fallbackSourceTrader?: string): Trade {
     const outcomeName = formatOutcomeLabel(apiTrade.outcome || apiTrade.outcomeName);
+    const sourceTrader = String(
+      apiTrade.user ||
+      apiTrade.owner ||
+      apiTrade.trader ||
+      apiTrade.wallet ||
+      apiTrade.maker ||
+      apiTrade.taker ||
+      fallbackSourceTrader ||
+      ''
+    ).toLowerCase();
     return {
       txHash: apiTrade.transactionHash || apiTrade.id || `trade-${apiTrade.timestamp}`,
       timestamp: apiTrade.timestamp * 1000,
       market: apiTrade.title || apiTrade.market || apiTrade.question || apiTrade.slug || apiTrade.conditionId,
       tokenId: apiTrade.asset || apiTrade.tokenId || apiTrade.token_id,
+      sourceTrader,
       side: apiTrade.side.toUpperCase() as 'BUY' | 'SELL',
       price: parseFloat(apiTrade.price),
       size: parseFloat(apiTrade.usdcSize || apiTrade.size),

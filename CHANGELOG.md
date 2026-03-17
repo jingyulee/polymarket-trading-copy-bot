@@ -20,3 +20,7 @@
 - add `REDEEM_CHECK_INTERVAL_MS` env
 - add `TELEGRAM_REDEEM_CHAT_ID` support
 - fix: resolve UNKNOWN outcome by mapping tokenId to outcome label
+- feat: make crypto filter configurable via env
+- feat: persist market lock and processed trade dedupe
+- feat: add source trader whitelist support
+- chore: improve telegram notification clarity

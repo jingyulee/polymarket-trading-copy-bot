@@ -11,3 +11,4 @@ build/
 *-lock.json
 .history
 .DS_Store
+data/*.sqlite

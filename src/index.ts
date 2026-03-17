@@ -6,7 +6,16 @@ import { TradeExecutor } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
 import { applyFilters, getMarketLockKey } from './filter.js';
-import { getRecentSkipStats, getSessionStats, logTrade } from './db.js';
+import {
+  getRecentSkipStats,
+  getSessionStats,
+  loadRecentMarketLocks,
+  loadRecentProcessedTradeKeys,
+  logTrade,
+  persistMarketLock,
+  persistProcessedTradeKey,
+  removeMarketLock,
+} from './db.js';
 import { sendTelegram, sendTelegramDeduped } from './telegram.js';
 import { startRedeemWatcher } from './redeem-watcher.js';
 
@@ -56,8 +65,12 @@ class PolymarketCopyBot {
     validateConfig();
 
     this.botStartTime = Date.now();
+    this.processedTrades = new Set(loadRecentProcessedTradeKeys());
+    this.marketLocks = new Set(loadRecentMarketLocks());
     console.log(`⏰ Bot start time: ${new Date(this.botStartTime).toISOString()}`);
     console.log('   (Only trades after this time will be copied)\n');
+    console.log(`   Loaded dedupe cache: ${this.processedTrades.size} processed trade keys`);
+    console.log(`   Loaded market locks: ${this.marketLocks.size}\n`);
 
     await this.monitor.initialize();
     await this.executor.initialize();
@@ -93,6 +106,16 @@ class PolymarketCopyBot {
         this.wsMonitor = undefined;
       }
     }
+
+    await sendTelegramDeduped(
+      'bot:start',
+      [
+        'COPY BOT STARTED',
+        `Source traders: ${(config.monitoring.sourceTraderWhitelist.length > 0 ? config.monitoring.sourceTraderWhitelist : [config.targetWallet]).join(', ')}`,
+        `Mode: ${config.trading.dryRun ? 'DRY_RUN' : 'LIVE'}`,
+        `Market scope: ${config.trading.marketScope}`,
+      ].join('\n')
+    );
 
     startRedeemWatcher(config, this.executor.getAccountAddress());
   }
@@ -135,6 +158,7 @@ class PolymarketCopyBot {
 
     for (const key of tradeKeys) {
       this.processedTrades.add(key);
+      persistProcessedTradeKey(key, trade.timestamp || Date.now());
     }
     this.pruneProcessedTrades();
     this.stats.tradesDetected++;
@@ -151,11 +175,6 @@ class PolymarketCopyBot {
     console.log(`   Token ID: ${trade.tokenId}`);
     console.log(`   Age: ${sourceAgeMs}ms`);
     console.log('='.repeat(50));
-
-    await sendTelegramDeduped(
-      `signal:${trade.txHash || marketLockKey}`,
-      `Signal ${trade.side} ${trade.outcome} ${trade.size} USDC @ ${trade.price.toFixed(3)}\n${trade.market}`
-    );
 
     if (this.wsMonitor) {
       await this.wsMonitor.subscribeToMarket(trade.tokenId);
@@ -202,6 +221,7 @@ class PolymarketCopyBot {
 
     if (config.trading.oneTradePerMarket) {
       this.marketLocks.add(marketLockKey);
+      persistMarketLock(marketLockKey, trade.timestamp || Date.now());
     }
 
     if (config.trading.dryRun) {
@@ -213,7 +233,13 @@ class PolymarketCopyBot {
         fillPrice: Number.isFinite(bestAsk) ? bestAsk : undefined,
       });
       console.log(`🧪 DRY_RUN enabled, skipped live order for ${trade.market}`);
-      await sendTelegram(`DRY_RUN copy ${trade.side} ${trade.outcome} ${copyNotional.toFixed(2)} USDC\n${trade.market}`);
+      await sendTelegramDeduped(
+        `dry-run:${trade.txHash || marketLockKey}`,
+        this.formatTelegramMessage('DRY RUN WOULD COPY', trade, {
+          copyNotional,
+          sourceAgeMs,
+        })
+      );
       this.printStats();
       return;
     }
@@ -239,12 +265,18 @@ class PolymarketCopyBot {
         sourceAgeMs,
       });
       console.log('✅ Successfully copied trade');
-      await sendTelegram(`COPY OK ${trade.side} ${trade.outcome} ${result.copyNotional.toFixed(2)} USDC @ ${result.price.toFixed(4)}\n${trade.market}`);
+      await sendTelegram(this.formatTelegramMessage('ORDER SUCCESS', trade, {
+        copyNotional: result.copyNotional,
+        fillPrice: result.price,
+        fillSize: result.copyShares,
+        sourceAgeMs,
+      }));
       this.printStats();
     } catch (error: any) {
       this.stats.tradesFailed++;
       if (config.trading.oneTradePerMarket) {
         this.marketLocks.delete(marketLockKey);
+        removeMarketLock(marketLockKey);
       }
       this.recordTradeLog(trade, {
         action: 'copy_fail',
@@ -256,9 +288,55 @@ class PolymarketCopyBot {
       if (error?.message) {
         console.log(`   Reason: ${error.message}`);
       }
-      await sendTelegram(`COPY FAIL ${trade.side} ${trade.outcome} ${copyNotional.toFixed(2)} USDC\n${trade.market}\n${error?.message || 'Unknown error'}`);
+      await sendTelegram(this.formatTelegramMessage('ORDER FAIL', trade, {
+        copyNotional,
+        reason: error?.message || 'Unknown error',
+        sourceAgeMs,
+      }));
       this.printStats();
     }
+  }
+
+  private formatTelegramMessage(
+    title: string,
+    trade: Trade,
+    details: {
+      copyNotional?: number;
+      fillPrice?: number;
+      fillSize?: number;
+      reason?: string;
+      sourceAgeMs?: number;
+    } = {}
+  ): string {
+    const lines = [
+      title,
+      `Market: ${trade.market}`,
+      `Side: ${trade.side} ${trade.outcome}`,
+      `Source price: ${trade.price.toFixed(4)}`,
+      `Source size: ${trade.size.toFixed(2)} USDC`,
+    ];
+
+    if (details.copyNotional != null) {
+      lines.push(`Copy notional: ${details.copyNotional.toFixed(2)} USDC`);
+    }
+
+    if (details.fillPrice != null) {
+      lines.push(`Fill price: ${details.fillPrice.toFixed(4)}`);
+    }
+
+    if (details.fillSize != null) {
+      lines.push(`Fill size: ${details.fillSize.toFixed(4)}`);
+    }
+
+    if (details.reason) {
+      lines.push(`Reason: ${details.reason}`);
+    }
+
+    if (details.sourceAgeMs != null) {
+      lines.push(`Source age: ${details.sourceAgeMs}ms`);
+    }
+
+    return lines.join('\n');
   }
 
   private recordTradeLog(

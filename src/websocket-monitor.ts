@@ -51,6 +51,13 @@ export class WebSocketMonitor {
 
   private onTradeCallback?: (trade: Trade) => Promise<void>;
 
+  private getAllowedSourceTraders(): Set<string> {
+    const traders = config.monitoring.sourceTraderWhitelist.length > 0
+      ? config.monitoring.sourceTraderWhitelist
+      : [config.targetWallet.toLowerCase()];
+    return new Set(traders.map((trader) => trader.toLowerCase()));
+  }
+
   async initialize(
     onTrade: (trade: Trade) => Promise<void>,
     channel: WsChannel = 'market',
@@ -255,9 +262,11 @@ export class WebSocketMonitor {
 
   private async handleTradeMessage(message: LastTradeMessage): Promise<void> {
     try {
-      const targetLower = config.targetWallet.toLowerCase();
-      const isMaker = message.maker?.toLowerCase() === targetLower;
-      const isTaker = message.taker?.toLowerCase() === targetLower;
+      const allowedTraders = this.getAllowedSourceTraders();
+      const maker = message.maker?.toLowerCase();
+      const taker = message.taker?.toLowerCase();
+      const isMaker = !!maker && allowedTraders.has(maker);
+      const isTaker = !!taker && allowedTraders.has(taker);
 
       if (!isMaker && !isTaker) {
         return;
@@ -271,6 +280,7 @@ export class WebSocketMonitor {
         timestamp: normalizedTimestamp,
         market: message.market,
         tokenId: message.asset_id,
+        sourceTrader: maker && isMaker ? maker : taker,
         side: message.side,
         price: parseFloat(message.price),
         size: parseFloat(message.size),

@@ -8,6 +8,7 @@ export interface FilterTrade {
   title?: string;
   tokenId?: string;
   conditionId?: string;
+  sourceTrader?: string;
   side?: 'BUY' | 'SELL' | string;
   price?: number;
   size?: number;
@@ -27,21 +28,9 @@ export interface FilterContext {
   marketLocks?: Set<string>;
 }
 
-const CRYPTO_KEYWORDS = [
-  'btc',
-  'bitcoin',
-  'eth',
-  'ethereum',
-  'sol',
-  'solana',
-  'xrp',
-  'doge',
-  'crypto',
-];
-
 function textContainsCrypto(value: string): boolean {
   const normalized = value.toLowerCase();
-  return CRYPTO_KEYWORDS.some((keyword) => normalized.includes(keyword));
+  return config.trading.cryptoKeywords.some((keyword) => normalized.includes(keyword));
 }
 
 export function getMarketLockKey(trade: FilterTrade): string {
@@ -81,7 +70,6 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
     const marketTexts = [
       trade.market,
       trade.marketSlug,
-      trade.question,
       trade.title,
       trade.outcome,
       trade.outcomeName,

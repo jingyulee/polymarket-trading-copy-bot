@@ -50,6 +50,22 @@ db.exec(`
   )
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS processed_trade (
+    trade_key TEXT PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS market_lock (
+    lock_key TEXT PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
 const insertTradeLog = db.prepare(`
   INSERT INTO trade_log (
     ts, market, market_slug, token_id, side,
@@ -60,6 +76,20 @@ const insertTradeLog = db.prepare(`
     @sourcePrice, @sourceSizeUsd, @sourceAgeMs,
     @action, @reason, @orderId, @fillPrice, @fillSize, @copyNotional
   )
+`);
+
+const insertProcessedTrade = db.prepare(`
+  INSERT OR IGNORE INTO processed_trade (trade_key, ts)
+  VALUES (?, ?)
+`);
+
+const insertMarketLock = db.prepare(`
+  INSERT OR IGNORE INTO market_lock (lock_key, ts)
+  VALUES (?, ?)
+`);
+
+const deleteMarketLockStmt = db.prepare(`
+  DELETE FROM market_lock WHERE lock_key = ?
 `);
 
 export function logTrade(entry: TradeLogEntry): void {
@@ -79,6 +109,42 @@ export function logTrade(entry: TradeLogEntry): void {
     fillSize: entry.fillSize ?? null,
     copyNotional: entry.copyNotional ?? null,
   });
+}
+
+export function persistProcessedTradeKey(tradeKey: string, ts: number = Date.now()): void {
+  insertProcessedTrade.run(tradeKey, ts);
+}
+
+export function persistMarketLock(lockKey: string, ts: number = Date.now()): void {
+  insertMarketLock.run(lockKey, ts);
+}
+
+export function removeMarketLock(lockKey: string): void {
+  deleteMarketLockStmt.run(lockKey);
+}
+
+export function loadRecentProcessedTradeKeys(windowMs: number = 7 * 24 * 60 * 60 * 1000): string[] {
+  const since = Date.now() - windowMs;
+  const stmt = db.prepare(`
+    SELECT trade_key
+    FROM processed_trade
+    WHERE ts >= ?
+    ORDER BY ts ASC
+  `);
+  const rows = stmt.all(since) as Array<{ trade_key: string }>;
+  return rows.map((row) => row.trade_key);
+}
+
+export function loadRecentMarketLocks(windowMs: number = 7 * 24 * 60 * 60 * 1000): string[] {
+  const since = Date.now() - windowMs;
+  const stmt = db.prepare(`
+    SELECT lock_key
+    FROM market_lock
+    WHERE ts >= ?
+    ORDER BY ts ASC
+  `);
+  const rows = stmt.all(since) as Array<{ lock_key: string }>;
+  return rows.map((row) => row.lock_key);
 }
 
 export function getRecentSkipStats(windowMs: number = 60 * 60 * 1000): Array<{ reason: string; count: number }> {

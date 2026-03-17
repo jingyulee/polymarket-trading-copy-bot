@@ -43,7 +43,7 @@ function buildRedeemMessage(position: RedeemablePosition): string {
   const size = normalizeNumber(position.size);
   const redeemableUsdc = normalizeNumber(position.redeemableAmount ?? position.redeemable ?? position.claimable ?? position.size);
   return [
-    '[REDEEMABLE POSITION]',
+    'REDEEM REMINDER',
     `Market: ${title}`,
     `Outcome: ${outcome}`,
     `Size: ${size.toFixed(4)}`,
