@@ -14,6 +14,8 @@ interface SettlementUpdaterConfig {
   };
 }
 
+const GAMMA_MARKETS_URL = 'https://gamma-api.polymarket.com/markets';
+
 function getPositionFields(position: StoredPosition): {
   tokenId: string;
   conditionId: string;
@@ -67,7 +69,7 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
 
     if (conditionId) {
       console.log(`[SETTLEMENT] lookup by condition_id=${conditionId}`);
-      const { data } = await axios.get<any[]>('https://data-api.polymarket.com/markets', {
+      const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
         params: {
           condition_ids: conditionId,
           limit: 1,
@@ -80,7 +82,7 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
 
     if (!market && marketSlug) {
       console.log(`[SETTLEMENT] lookup by market_slug=${marketSlug}`);
-      const { data } = await axios.get<any[]>('https://data-api.polymarket.com/markets', {
+      const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
         params: {
           slug: marketSlug,
           limit: 1,

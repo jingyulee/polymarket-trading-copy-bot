@@ -29,3 +29,4 @@
 - feat: add pnl and win rate stats
 - fix: support snake_case position fields in settlement updater
 - fix: use condition_id / market_slug for settlement resolution lookup instead of token_id
+- fix: use gamma-api markets endpoint in settlement updater
