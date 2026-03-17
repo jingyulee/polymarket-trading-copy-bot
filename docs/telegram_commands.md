@@ -163,6 +163,7 @@ slippage_gap_too_high: 1
 - `risk_line`：依價格區間顯示風險提示
 - `Copy`：本次 copy notional
 - `Source`：來源 trader 的原始下單金額
+- `Fill / Size`：僅在 `LIVE — ORDER PLACED` 顯示實際成交價格與成交數量
 - `延遲`：來源交易到 bot 偵測的延遲秒數
 
 DRY RUN — WOULD COPY 範例：
@@ -195,6 +196,9 @@ DRY RUN — SKIP 範例：
 
 💰 Copy: 5.00 USDC
 📊 Source: 24.00 USDC
+
+🎯 Fill: 0.9912
+📦 Size: 5.0456
 
 ⏱ 延遲: 1.4s
 ```
@@ -232,6 +236,10 @@ LIVE — FAILED 範例：
 
 ⏱ 延遲: 1.4s
 ```
+
+補充：
+- `LIVE — ORDER PLACED` 會顯示 `🎯 Fill` 與 `📦 Size`
+- `DRY RUN — WOULD COPY`、`SKIP`、`FAILED` 不顯示 `Fill / Size`
 
 價格風險提示規則：
 - `price >= 0.99`：`⚠️ 高價區（風險高）`

@@ -312,6 +312,8 @@ class PolymarketCopyBot {
         mode: 'LIVE',
         decision: 'ORDER_PLACED',
         copyNotional: result.copyNotional,
+        fillPrice: result.price,
+        fillSize: result.copyShares,
         sourceAgeMs,
       }));
       this.printStats();

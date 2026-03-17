@@ -38,3 +38,4 @@
 - feat: add price risk indicator in telegram trade notification
 - improve: unify telegram trade notification layout for dry run and live
 - feat: add unified decision header for trade notifications
+- fix: restore fill price and fill size in live trade notification

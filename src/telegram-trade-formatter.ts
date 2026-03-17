@@ -61,6 +61,8 @@ export function formatTradeMessage(
     mode: TelegramTradeMode;
     decision: TelegramTradeDecision;
     copyNotional: number;
+    fillPrice?: number;
+    fillSize?: number;
     sourceAgeMs: number;
     reason?: string;
   }
@@ -84,6 +86,22 @@ export function formatTradeMessage(
     '',
     `💰 Copy: ${options.copyNotional.toFixed(2)} USDC`,
     `📊 Source: ${Number(trade.size || 0).toFixed(2)} USDC`,
+  );
+
+  if (
+    options.mode === 'LIVE' &&
+    options.decision === 'ORDER_PLACED' &&
+    options.fillPrice != null &&
+    options.fillSize != null
+  ) {
+    lines.push(
+      '',
+      `🎯 Fill: ${options.fillPrice.toFixed(4)}`,
+      `📦 Size: ${options.fillSize.toFixed(4)}`,
+    );
+  }
+
+  lines.push(
     '',
     `⏱ 延遲: ${sourceAgeSec.toFixed(1)}s`,
   );
