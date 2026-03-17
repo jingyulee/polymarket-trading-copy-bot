@@ -62,18 +62,37 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
   }
 
   try {
-    const { data } = await axios.get<any[]>('https://data-api.polymarket.com/markets', {
-      params: {
-        ...(tokenId ? { clob_token_ids: tokenId } : {}),
-        ...(conditionId ? { condition_ids: conditionId } : {}),
-        ...(marketSlug ? { slug: marketSlug } : {}),
-        limit: 1,
-      },
-      timeout: 15_000,
-    });
+    let market: any | undefined;
+    let resolutionSource = '';
 
-    const market = Array.isArray(data) ? data[0] : undefined;
+    if (conditionId) {
+      console.log(`[SETTLEMENT] lookup by condition_id=${conditionId}`);
+      const { data } = await axios.get<any[]>('https://data-api.polymarket.com/markets', {
+        params: {
+          condition_ids: conditionId,
+          limit: 1,
+        },
+        timeout: 15_000,
+      });
+      market = Array.isArray(data) ? data[0] : undefined;
+      resolutionSource = `condition_id=${conditionId}`;
+    }
+
+    if (!market && marketSlug) {
+      console.log(`[SETTLEMENT] lookup by market_slug=${marketSlug}`);
+      const { data } = await axios.get<any[]>('https://data-api.polymarket.com/markets', {
+        params: {
+          slug: marketSlug,
+          limit: 1,
+        },
+        timeout: 15_000,
+      });
+      market = Array.isArray(data) ? data[0] : undefined;
+      resolutionSource = `market_slug=${marketSlug}`;
+    }
+
     if (!market) {
+      console.warn(`[SETTLEMENT] could not resolve market metadata for ${lookupKey} via condition_id / market_slug`);
       return null;
     }
 
@@ -86,6 +105,7 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
       market.winner
     );
     if (directWinner) {
+      console.log(`[SETTLEMENT] market resolved via ${resolutionSource}`);
       return directWinner;
     }
 
@@ -94,6 +114,7 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
       const candidateId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
       const isWinner = token?.winner === true || token?.winning === true || token?.isWinner === true;
       if (candidateId === tokenId && isWinner) {
+        console.log(`[SETTLEMENT] token winner matched via ${resolutionSource}`);
         return normalizeOutcome(token?.outcome || token?.label || token?.name);
       }
     }
@@ -104,12 +125,13 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
         const candidateId = String(tokens[i]?.token_id || tokens[i]?.tokenId || tokens[i]?.asset_id || tokens[i]?.id || '');
         const isWinner = tokens[i]?.winner === true || tokens[i]?.winning === true || tokens[i]?.isWinner === true;
         if (candidateId === tokenId && isWinner) {
+          console.log(`[SETTLEMENT] token winner matched via ${resolutionSource}`);
           return outcomes[i] || null;
         }
       }
     }
   } catch (error: any) {
-    console.warn(`[SETTLEMENT] failed to fetch market resolution for ${lookupKey}: ${error?.message || error}`);
+    console.warn(`[SETTLEMENT] failed to fetch market resolution for ${lookupKey} via condition_id / market_slug: ${error?.message || error}`);
   }
 
   return null;
