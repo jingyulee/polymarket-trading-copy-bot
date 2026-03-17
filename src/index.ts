@@ -262,6 +262,7 @@ class PolymarketCopyBot {
         `dry-run:${trade.txHash || marketLockKey}`,
         formatTradeMessage(trade, {
           mode: 'DRY',
+          decision: 'WOULD_COPY',
           copyNotional,
           sourceAgeMs,
         })
@@ -309,6 +310,7 @@ class PolymarketCopyBot {
       console.log('✅ Successfully copied trade');
       await sendTelegram(formatTradeMessage(trade, {
         mode: 'LIVE',
+        decision: 'ORDER_PLACED',
         copyNotional: result.copyNotional,
         sourceAgeMs,
       }));
@@ -329,44 +331,15 @@ class PolymarketCopyBot {
       if (error?.message) {
         console.log(`   Reason: ${error.message}`);
       }
-      await sendTelegram(this.formatTradeFailureMessage(trade, {
+      await sendTelegram(formatTradeMessage(trade, {
+        mode: 'LIVE',
+        decision: 'FAILED',
         copyNotional,
         reason: error?.message || 'Unknown error',
         sourceAgeMs,
       }));
       this.printStats();
     }
-  }
-
-  private formatTradeFailureMessage(
-    trade: Trade,
-    details: {
-      copyNotional?: number;
-      reason?: string;
-      sourceAgeMs?: number;
-    } = {}
-  ): string {
-    const lines = [
-      '🔴 LIVE FAIL',
-      `Market: ${trade.market}`,
-      `Side: ${trade.side} ${trade.outcome}`,
-      `Source price: ${trade.price.toFixed(4)}`,
-      `Source size: ${trade.size.toFixed(2)} USDC`,
-    ];
-
-    if (details.copyNotional != null) {
-      lines.push(`Copy notional: ${details.copyNotional.toFixed(2)} USDC`);
-    }
-
-    if (details.reason) {
-      lines.push(`Reason: ${details.reason}`);
-    }
-
-    if (details.sourceAgeMs != null) {
-      lines.push(`Source age: ${details.sourceAgeMs}ms`);
-    }
-
-    return lines.join('\n');
   }
 
   private recordTradeLog(

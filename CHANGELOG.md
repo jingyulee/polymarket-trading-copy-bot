@@ -36,3 +36,5 @@
 - improve: restructure telegram stats output into settled/open/overall sections
 - improve: unify telegram trade notification format for dry run and live
 - feat: add price risk indicator in telegram trade notification
+- improve: unify telegram trade notification layout for dry run and live
+- feat: add unified decision header for trade notifications

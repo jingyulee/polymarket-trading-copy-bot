@@ -1,9 +1,30 @@
 import type { Trade } from './monitor.js';
 
 export type TelegramTradeMode = 'DRY' | 'LIVE';
+export type TelegramTradeDecision = 'WOULD_COPY' | 'ORDER_PLACED' | 'SKIP' | 'FAILED';
 
-function formatHeader(mode: TelegramTradeMode): string {
-  return mode === 'DRY' ? '🟡 DRY RUN' : '🟢 LIVE';
+function formatHeader(mode: TelegramTradeMode, decision: TelegramTradeDecision): string {
+  if (mode === 'DRY' && decision === 'WOULD_COPY') {
+    return '🟡 DRY RUN — WOULD COPY';
+  }
+
+  if (mode === 'DRY' && decision === 'SKIP') {
+    return '🔴 DRY RUN — SKIP';
+  }
+
+  if (mode === 'DRY' && decision === 'FAILED') {
+    return '❌ DRY RUN — FAILED';
+  }
+
+  if (mode === 'LIVE' && decision === 'ORDER_PLACED') {
+    return '🟢 LIVE — ORDER PLACED';
+  }
+
+  if (mode === 'LIVE' && decision === 'SKIP') {
+    return '🔴 LIVE — SKIP';
+  }
+
+  return '❌ LIVE — FAILED';
 }
 
 function formatSideLine(trade: Trade): string {
@@ -38,16 +59,25 @@ export function formatTradeMessage(
   trade: Trade,
   options: {
     mode: TelegramTradeMode;
+    decision: TelegramTradeDecision;
     copyNotional: number;
     sourceAgeMs: number;
+    reason?: string;
   }
 ): string {
   const sourceAgeSec = Math.max(0, options.sourceAgeMs) / 1000;
 
-  return [
-    formatHeader(options.mode),
+  const lines = [
+    formatHeader(options.mode, options.decision),
     '',
     `📌 ${trade.market}`,
+  ];
+
+  if (options.reason) {
+    lines.push('', `原因: ${options.reason}`);
+  }
+
+  lines.push(
     '',
     formatSideLine(trade),
     formatRiskLine(Number(trade.price || 0)),
@@ -56,5 +86,7 @@ export function formatTradeMessage(
     `📊 Source: ${Number(trade.size || 0).toFixed(2)} USDC`,
     '',
     `⏱ 延遲: ${sourceAgeSec.toFixed(1)}s`,
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }

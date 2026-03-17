@@ -153,21 +153,22 @@ slippage_gap_too_high: 1
 ```
 
 ## 交易通知格式
-用途：當 bot 偵測到可跟單交易時，DRY RUN 與 LIVE 成功通知共用同一套格式，只有標題模式不同。
+用途：所有交易通知共用同一套版型，DRY RUN 與 LIVE 只有第一行 status header 不同。
 
 欄位說明：
-- `HEADER`：模式標題，DRY RUN 為 `🟡 DRY RUN`，LIVE 為 `🟢 LIVE`
+- `HEADER`：模式與 decision 組合，例如 `🟡 DRY RUN — WOULD COPY`
 - `market_title`：直接顯示原始 market 字串，不拆分、不縮寫
+- `原因`：僅在 `SKIP` / `FAILED` 時顯示
 - `side_line`：顯示方向、outcome 與價格，例如 `🟢 BUY UP @ 0.9900`
 - `risk_line`：依價格區間顯示風險提示
 - `Copy`：本次 copy notional
 - `Source`：來源 trader 的原始下單金額
 - `延遲`：來源交易到 bot 偵測的延遲秒數
 
-DRY RUN 範例：
+DRY RUN — WOULD COPY 範例：
 
 ```text
-🟡 DRY RUN
+🟡 DRY RUN — WOULD COPY
 
 📌 BNB Up or Down - March 17, 3:05PM-3:10PM ET
 
@@ -180,12 +181,48 @@ DRY RUN 範例：
 ⏱ 延遲: 1.4s
 ```
 
-LIVE 範例：
+DRY RUN — SKIP 範例：
 
 ```text
-🟢 LIVE
+🔴 DRY RUN — SKIP
 
 📌 BNB Up or Down - March 17, 3:05PM-3:10PM ET
+
+原因: stale_trade
+
+🟢 BUY UP @ 0.9900
+⚠️ 高價區（風險高）
+
+💰 Copy: 5.00 USDC
+📊 Source: 24.00 USDC
+
+⏱ 延遲: 1.4s
+```
+
+LIVE — ORDER PLACED 範例：
+
+```text
+🟢 LIVE — ORDER PLACED
+
+📌 BNB Up or Down - March 17, 3:05PM-3:10PM ET
+
+🟢 BUY UP @ 0.9900
+⚠️ 高價區（風險高）
+
+💰 Copy: 5.00 USDC
+📊 Source: 24.00 USDC
+
+⏱ 延遲: 1.4s
+```
+
+LIVE — FAILED 範例：
+
+```text
+❌ LIVE — FAILED
+
+📌 BNB Up or Down - March 17, 3:05PM-3:10PM ET
+
+原因: insufficient balance
 
 🟢 BUY UP @ 0.9900
 ⚠️ 高價區（風險高）
