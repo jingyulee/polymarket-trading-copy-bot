@@ -1,0 +1,6 @@
+[
+  {
+    "type": "sqlite",
+    "path": "/Users/jingyu/AcubeDT/ac_docker_git/www_root/polymarket/gpt/polymarket-trading-copy-bot/data/trade-log.sqlite"
+  }
+]

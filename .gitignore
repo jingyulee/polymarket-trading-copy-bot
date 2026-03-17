@@ -9,3 +9,4 @@ build/
 .env.*
 .polymarket-api-creds
 *-lock.json
+.history
