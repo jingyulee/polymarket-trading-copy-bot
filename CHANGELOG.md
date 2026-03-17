@@ -34,3 +34,5 @@
 - feat: add telegram monitoring commands
 - feat: add telegram_commands.md documentation
 - improve: restructure telegram stats output into settled/open/overall sections
+- improve: unify telegram trade notification format for dry run and live
+- feat: add price risk indicator in telegram trade notification

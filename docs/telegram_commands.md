@@ -152,6 +152,55 @@ non_crypto_market: 2
 slippage_gap_too_high: 1
 ```
 
+## 交易通知格式
+用途：當 bot 偵測到可跟單交易時，DRY RUN 與 LIVE 成功通知共用同一套格式，只有標題模式不同。
+
+欄位說明：
+- `HEADER`：模式標題，DRY RUN 為 `🟡 DRY RUN`，LIVE 為 `🟢 LIVE`
+- `market_title`：直接顯示原始 market 字串，不拆分、不縮寫
+- `side_line`：顯示方向、outcome 與價格，例如 `🟢 BUY UP @ 0.9900`
+- `risk_line`：依價格區間顯示風險提示
+- `Copy`：本次 copy notional
+- `Source`：來源 trader 的原始下單金額
+- `延遲`：來源交易到 bot 偵測的延遲秒數
+
+DRY RUN 範例：
+
+```text
+🟡 DRY RUN
+
+📌 BNB Up or Down - March 17, 3:05PM-3:10PM ET
+
+🟢 BUY UP @ 0.9900
+⚠️ 高價區（風險高）
+
+💰 Copy: 5.00 USDC
+📊 Source: 24.00 USDC
+
+⏱ 延遲: 1.4s
+```
+
+LIVE 範例：
+
+```text
+🟢 LIVE
+
+📌 BNB Up or Down - March 17, 3:05PM-3:10PM ET
+
+🟢 BUY UP @ 0.9900
+⚠️ 高價區（風險高）
+
+💰 Copy: 5.00 USDC
+📊 Source: 24.00 USDC
+
+⏱ 延遲: 1.4s
+```
+
+價格風險提示規則：
+- `price >= 0.99`：`⚠️ 高價區（風險高）`
+- `0.97 <= price < 0.99`：`⚡ 中價區（可觀察）`
+- `price < 0.97`：`🟢 低價區（較佳）`
+
 ## 無資料時的回覆
 若查詢結果為空，bot 會回覆：
 

@@ -20,6 +20,7 @@ import {
 } from './db.js';
 import { sendTelegram, sendTelegramDeduped } from './telegram.js';
 import { startTelegramCommandWatcher } from './telegram-commands.js';
+import { formatTradeMessage } from './telegram-trade-formatter.js';
 import { startRedeemWatcher } from './redeem-watcher.js';
 import { startSettlementUpdater } from './settlement-updater.js';
 
@@ -259,7 +260,8 @@ class PolymarketCopyBot {
       console.log(`🧪 DRY_RUN enabled, skipped live order for ${trade.market}`);
       await sendTelegramDeduped(
         `dry-run:${trade.txHash || marketLockKey}`,
-        this.formatTelegramMessage('DRY RUN WOULD COPY', trade, {
+        formatTradeMessage(trade, {
+          mode: 'DRY',
           copyNotional,
           sourceAgeMs,
         })
@@ -305,10 +307,9 @@ class PolymarketCopyBot {
         status: 'open',
       });
       console.log('✅ Successfully copied trade');
-      await sendTelegram(this.formatTelegramMessage('ORDER SUCCESS', trade, {
+      await sendTelegram(formatTradeMessage(trade, {
+        mode: 'LIVE',
         copyNotional: result.copyNotional,
-        fillPrice: result.price,
-        fillSize: result.copyShares,
         sourceAgeMs,
       }));
       this.printStats();
@@ -328,7 +329,7 @@ class PolymarketCopyBot {
       if (error?.message) {
         console.log(`   Reason: ${error.message}`);
       }
-      await sendTelegram(this.formatTelegramMessage('ORDER FAIL', trade, {
+      await sendTelegram(this.formatTradeFailureMessage(trade, {
         copyNotional,
         reason: error?.message || 'Unknown error',
         sourceAgeMs,
@@ -337,19 +338,16 @@ class PolymarketCopyBot {
     }
   }
 
-  private formatTelegramMessage(
-    title: string,
+  private formatTradeFailureMessage(
     trade: Trade,
     details: {
       copyNotional?: number;
-      fillPrice?: number;
-      fillSize?: number;
       reason?: string;
       sourceAgeMs?: number;
     } = {}
   ): string {
     const lines = [
-      title,
+      '🔴 LIVE FAIL',
       `Market: ${trade.market}`,
       `Side: ${trade.side} ${trade.outcome}`,
       `Source price: ${trade.price.toFixed(4)}`,
@@ -358,14 +356,6 @@ class PolymarketCopyBot {
 
     if (details.copyNotional != null) {
       lines.push(`Copy notional: ${details.copyNotional.toFixed(2)} USDC`);
-    }
-
-    if (details.fillPrice != null) {
-      lines.push(`Fill price: ${details.fillPrice.toFixed(4)}`);
-    }
-
-    if (details.fillSize != null) {
-      lines.push(`Fill size: ${details.fillSize.toFixed(4)}`);
     }
 
     if (details.reason) {
