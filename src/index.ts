@@ -12,12 +12,15 @@ import {
   loadRecentMarketLocks,
   loadRecentProcessedTradeKeys,
   logTrade,
+  insertLivePosition,
+  insertSimPosition,
   persistMarketLock,
   persistProcessedTradeKey,
   removeMarketLock,
 } from './db.js';
 import { sendTelegram, sendTelegramDeduped } from './telegram.js';
 import { startRedeemWatcher } from './redeem-watcher.js';
+import { startSettlementUpdater } from './settlement-updater.js';
 
 class PolymarketCopyBot {
   private monitor: TradeMonitor;
@@ -118,6 +121,7 @@ class PolymarketCopyBot {
     );
 
     startRedeemWatcher(config, this.executor.getAccountAddress());
+    startSettlementUpdater(config);
   }
 
   async start(): Promise<void> {
@@ -225,12 +229,30 @@ class PolymarketCopyBot {
     }
 
     if (config.trading.dryRun) {
+      const entryPrice = Number.isFinite(bestAsk) ? bestAsk : trade.price;
+      const entryShares = this.executor.calculateSharesFromNotional(copyNotional, entryPrice);
       this.recordTradeLog(trade, {
         action: 'dry_run',
         reason: 'dry_run_enabled',
         sourceAgeMs,
         copyNotional,
         fillPrice: Number.isFinite(bestAsk) ? bestAsk : undefined,
+      });
+      insertSimPosition({
+        conditionId: trade.conditionId,
+        market: trade.market,
+        marketSlug: trade.marketSlug,
+        tokenId: trade.tokenId,
+        outcome: trade.outcome,
+        side: trade.side,
+        entryTs: trade.timestamp || Date.now(),
+        entryPrice,
+        entryShares,
+        entryNotional: copyNotional,
+        sourcePrice: trade.price,
+        sourceSizeUsd: trade.size,
+        orderId: null,
+        status: 'open',
       });
       console.log(`🧪 DRY_RUN enabled, skipped live order for ${trade.market}`);
       await sendTelegramDeduped(
@@ -263,6 +285,22 @@ class PolymarketCopyBot {
         fillSize: result.copyShares,
         copyNotional: result.copyNotional,
         sourceAgeMs,
+      });
+      insertLivePosition({
+        conditionId: trade.conditionId,
+        market: trade.market,
+        marketSlug: trade.marketSlug,
+        tokenId: trade.tokenId,
+        outcome: trade.outcome,
+        side: trade.side,
+        entryTs: trade.timestamp || Date.now(),
+        entryPrice: result.price,
+        entryShares: result.copyShares,
+        entryNotional: result.copyNotional,
+        sourcePrice: trade.price,
+        sourceSizeUsd: trade.size,
+        orderId: result.orderId,
+        status: 'open',
       });
       console.log('✅ Successfully copied trade');
       await sendTelegram(this.formatTelegramMessage('ORDER SUCCESS', trade, {

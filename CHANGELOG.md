@@ -24,3 +24,6 @@
 - feat: persist market lock and processed trade dedupe
 - feat: add source trader whitelist support
 - chore: improve telegram notification clarity
+- feat: add positions_sim and positions_live
+- feat: add settlement updater
+- feat: add pnl and win rate stats
