@@ -82,6 +82,7 @@ export const config = {
     useUserChannel: process.env.USE_USER_CHANNEL === 'true',
     wsAssetIds: parseCsv(process.env.WS_ASSET_IDS),
     wsMarketIds: parseCsv(process.env.WS_MARKET_IDS),
+    redeemCheckIntervalMs: Number(process.env.REDEEM_CHECK_INTERVAL_MS || 60000),
   },
 
   notifications: {

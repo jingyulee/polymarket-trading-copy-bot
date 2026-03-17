@@ -8,6 +8,7 @@ import { RiskManager } from './risk-manager.js';
 import { applyFilters, getMarketLockKey } from './filter.js';
 import { getRecentSkipStats, getSessionStats, logTrade } from './db.js';
 import { sendTelegram, sendTelegramDeduped } from './telegram.js';
+import { startRedeemWatcher } from './redeem-watcher.js';
 
 class PolymarketCopyBot {
   private monitor: TradeMonitor;
@@ -67,7 +68,12 @@ class PolymarketCopyBot {
       try {
         const wsAuth = this.executor.getWsAuth();
         const channel = config.monitoring.useUserChannel ? 'user' : 'market';
-        await this.wsMonitor.initialize(this.handleNewTrade.bind(this), channel, wsAuth);
+        await this.wsMonitor.initialize(
+          this.handleNewTrade.bind(this),
+          channel,
+          wsAuth,
+          this.executor.getOutcomeLabel.bind(this.executor)
+        );
         console.log(`✅ WebSocket monitor initialized (${channel} channel)\n`);
 
         if (channel === 'market' && config.monitoring.wsAssetIds.length > 0) {
@@ -87,6 +93,8 @@ class PolymarketCopyBot {
         this.wsMonitor = undefined;
       }
     }
+
+    startRedeemWatcher(config, this.executor.getAccountAddress());
   }
 
   async start(): Promise<void> {
@@ -110,6 +118,12 @@ class PolymarketCopyBot {
   }
 
   private async handleNewTrade(trade: Trade): Promise<void> {
+    if (trade.outcome === 'UNKNOWN') {
+      const mappedOutcome = await this.executor.getOutcomeLabel(trade.tokenId);
+      trade.outcome = mappedOutcome;
+      trade.outcomeName = mappedOutcome;
+    }
+
     if (trade.timestamp && trade.timestamp < this.botStartTime) {
       return;
     }

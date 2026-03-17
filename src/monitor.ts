@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { config } from './config.js';
 
-export type TradeOutcome = 'YES' | 'NO' | 'UNKNOWN';
+export type TradeOutcome = string;
 
 export interface Trade {
   txHash: string;
@@ -17,6 +17,18 @@ export interface Trade {
   question?: string;
   title?: string;
   outcomeName?: string;
+}
+
+function formatOutcomeLabel(value: any): string {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return 'UNKNOWN';
+
+  const upper = normalized.toUpperCase();
+  if (upper === 'YES') return 'YES';
+  if (upper === 'NO') return 'NO';
+  if (upper === 'UP') return 'UP';
+  if (upper === 'DOWN') return 'DOWN';
+  return normalized;
 }
 
 export class TradeMonitor {
@@ -61,6 +73,7 @@ export class TradeMonitor {
   }
 
   private parseDataApiTrade(apiTrade: any): Trade {
+    const outcomeName = formatOutcomeLabel(apiTrade.outcome || apiTrade.outcomeName);
     return {
       txHash: apiTrade.transactionHash || apiTrade.id || `trade-${apiTrade.timestamp}`,
       timestamp: apiTrade.timestamp * 1000,
@@ -69,21 +82,13 @@ export class TradeMonitor {
       side: apiTrade.side.toUpperCase() as 'BUY' | 'SELL',
       price: parseFloat(apiTrade.price),
       size: parseFloat(apiTrade.usdcSize || apiTrade.size),
-      outcome: this.normalizeOutcome(apiTrade.outcome),
+      outcome: outcomeName,
       conditionId: apiTrade.conditionId || apiTrade.condition_id,
       marketSlug: apiTrade.slug || apiTrade.marketSlug || apiTrade.market_slug,
       question: apiTrade.question,
       title: apiTrade.title,
-      outcomeName: apiTrade.outcome || apiTrade.outcomeName,
+      outcomeName,
     };
-  }
-
-  private normalizeOutcome(value: any): TradeOutcome {
-    const normalized = String(value ?? '').trim().toUpperCase();
-    if (normalized === 'YES' || normalized === 'NO') {
-      return normalized;
-    }
-    return 'UNKNOWN';
   }
   
   async pollForNewTrades(callback: (trade: Trade) => Promise<void>): Promise<void> {

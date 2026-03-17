@@ -15,3 +15,8 @@
 - 新增 `DRY_RUN` 模式與最小侵入式主流程調整，保留既有 execution engine，讓偵測、過濾、dry-run、實單、成功與失敗都走同一條事件管線。
 - 新增 SQLite `trade_log`，將 `skip`、`dry_run`、`copy_success`、`copy_fail` 全部持久化，並提供近期 skip 與 session stats 查詢。
 - 新增 Telegram 通知與 5 秒 dedupe 視窗，避免重複訊號轟炸且不阻斷主流程。
+- 補齊 `.env.example` 的所有實際 env keys，加入 Telegram 相關欄位，避免因範例檔漏設造成通知未啟用。
+- feat: add redeem watcher (auto notify redeemable positions)
+- add `REDEEM_CHECK_INTERVAL_MS` env
+- add `TELEGRAM_REDEEM_CHAT_ID` support
+- fix: resolve UNKNOWN outcome by mapping tokenId to outcome label

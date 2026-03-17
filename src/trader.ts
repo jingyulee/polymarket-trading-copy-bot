@@ -12,6 +12,7 @@ interface MarketMetadata {
   negRisk: boolean;
   feeRateBps: number;
   conditionId?: string;
+  outcomeLabel?: string;
   timestamp: number;
 }
 
@@ -37,6 +38,7 @@ export class TradeExecutor {
   private clobClient: ClobClient;
   private apiCreds?: { apiKey: string; secret: string; passphrase: string };
   private marketCache: Map<string, MarketMetadata> = new Map();
+  private warnedMissingOutcomeMappings = new Set<string>();
   private readonly CACHE_TTL = 3600000;
   private readonly RETRY_CONFIG: RetryConfig = {
     maxAttempts: 3,
@@ -155,6 +157,12 @@ export class TradeExecutor {
     return this.apiCreds;
   }
 
+  getAccountAddress(): string {
+    return config.auth.sigType !== 0 && config.auth.funderAddress
+      ? config.auth.funderAddress
+      : this.wallet.address;
+  }
+
   getCacheStats(): { size: number; items: string[] } {
     return {
       size: this.marketCache.size,
@@ -195,10 +203,11 @@ export class TradeExecutor {
     }
 
     try {
-      const [tickSizeData, negRisk, feeRateBps] = await Promise.all([
+      const [tickSizeData, negRisk, feeRateBps, outcomeLabel] = await Promise.all([
         this.clobClient.getTickSize(tokenId).catch(() => ({ minimum_tick_size: '0.01' })),
         this.clobClient.getNegRisk(tokenId).catch(() => false),
         this.clobClient.getFeeRateBps(tokenId).catch(() => 0),
+        this.resolveOutcomeLabel(tokenId),
       ]);
 
       const tickSizeStr = (tickSizeData as any)?.minimum_tick_size || tickSizeData || '0.01';
@@ -209,6 +218,7 @@ export class TradeExecutor {
         tickSizeStr,
         negRisk,
         feeRateBps,
+        outcomeLabel,
         timestamp: now,
       };
 
@@ -222,11 +232,107 @@ export class TradeExecutor {
         tickSizeStr: '0.01',
         negRisk: false,
         feeRateBps: 0,
+        outcomeLabel: undefined,
         timestamp: now,
       };
       this.marketCache.set(tokenId, defaultMetadata);
       return defaultMetadata;
     }
+  }
+
+  async getOutcomeLabel(tokenId: string): Promise<string> {
+    const metadata = await this.getMarketMetadata(tokenId);
+    if (metadata.outcomeLabel) {
+      return metadata.outcomeLabel;
+    }
+    if (!this.warnedMissingOutcomeMappings.has(tokenId)) {
+      this.warnedMissingOutcomeMappings.add(tokenId);
+      console.warn(`[WARN] outcome mapping not found for tokenId=${tokenId}`);
+    }
+    return 'UNKNOWN';
+  }
+
+  private async resolveOutcomeLabel(tokenId: string): Promise<string | undefined> {
+    try {
+      const { data } = await axios.get<any[]>(`${DATA_API_BASE}/markets`, {
+        params: {
+          clob_token_ids: tokenId,
+          limit: 1,
+        },
+        timeout: 15_000,
+      });
+
+      const market = Array.isArray(data) ? data[0] : undefined;
+      if (!market) {
+        return undefined;
+      }
+
+      const tokenLabel = this.findOutcomeLabelInMarket(market, tokenId);
+      return tokenLabel || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private findOutcomeLabelInMarket(market: any, tokenId: string): string | undefined {
+    const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
+    for (const token of tokens) {
+      const candidateId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
+      if (candidateId !== tokenId) {
+        continue;
+      }
+
+      const directLabel = this.normalizeOutcomeLabel(
+        token?.outcome ||
+        token?.label ||
+        token?.name ||
+        token?.shortName ||
+        token?.short_name
+      );
+      if (directLabel) {
+        return directLabel;
+      }
+    }
+
+    const outcomes = this.parseOutcomeArray(market?.outcomes);
+    if (outcomes.length === tokens.length && outcomes.length > 0) {
+      for (let i = 0; i < tokens.length; i++) {
+        const candidateId = String(tokens[i]?.token_id || tokens[i]?.tokenId || tokens[i]?.asset_id || tokens[i]?.id || '');
+        if (candidateId === tokenId) {
+          return outcomes[i];
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private parseOutcomeArray(value: any): string[] {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.normalizeOutcomeLabel(item)).filter(Boolean) as string[];
+    }
+
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => this.normalizeOutcomeLabel(item)).filter(Boolean) as string[];
+        }
+      } catch {
+        return value
+          .split(',')
+          .map((item) => this.normalizeOutcomeLabel(item))
+          .filter(Boolean) as string[];
+      }
+    }
+
+    return [];
+  }
+
+  private normalizeOutcomeLabel(value: any): string | undefined {
+    const normalized = String(value ?? '').trim();
+    if (!normalized) return undefined;
+    return normalized.toUpperCase();
   }
 
   async getTickSize(tokenId: string): Promise<number> {

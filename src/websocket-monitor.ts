@@ -47,17 +47,20 @@ export class WebSocketMonitor {
   private readonly WS_URL_USER = 'wss://ws-subscriptions-clob.polymarket.com/ws/user';
   private channel: WsChannel = 'market';
   private auth: WsAuth | undefined;
+  private outcomeResolver?: (tokenId: string) => Promise<string>;
 
   private onTradeCallback?: (trade: Trade) => Promise<void>;
 
   async initialize(
     onTrade: (trade: Trade) => Promise<void>,
     channel: WsChannel = 'market',
-    auth?: WsAuth
+    auth?: WsAuth,
+    outcomeResolver?: (tokenId: string) => Promise<string>
   ): Promise<void> {
     this.onTradeCallback = onTrade;
     this.channel = channel;
     this.auth = auth;
+    this.outcomeResolver = outcomeResolver;
     if (this.channel === 'user' && !this.auth) {
       throw new Error('User channel requires WebSocket auth (apiKey/secret/passphrase)');
     }
@@ -272,8 +275,14 @@ export class WebSocketMonitor {
         price: parseFloat(message.price),
         size: parseFloat(message.size),
         outcome: this.normalizeOutcome(message.outcome),
-        outcomeName: message.outcome,
+        outcomeName: this.normalizeOutcome(message.outcome),
       };
+
+      if (trade.outcome === 'UNKNOWN' && this.outcomeResolver) {
+        const mappedOutcome = await this.outcomeResolver(trade.tokenId);
+        trade.outcome = mappedOutcome;
+        trade.outcomeName = mappedOutcome;
+      }
 
       console.log(`⚡ WebSocket trade detected: ${trade.side} ${trade.size} USDC @ ${trade.price.toFixed(3)}`);
 
@@ -286,9 +295,9 @@ export class WebSocketMonitor {
     }
   }
 
-  private normalizeOutcome(value?: string): 'YES' | 'NO' | 'UNKNOWN' {
+  private normalizeOutcome(value?: string): string {
     const normalized = String(value ?? '').trim().toUpperCase();
-    if (normalized === 'YES' || normalized === 'NO') {
+    if (normalized === 'YES' || normalized === 'NO' || normalized === 'UP' || normalized === 'DOWN') {
       return normalized;
     }
     return 'UNKNOWN';
