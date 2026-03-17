@@ -14,6 +14,22 @@ interface SettlementUpdaterConfig {
   };
 }
 
+function getPositionFields(position: StoredPosition): {
+  tokenId: string;
+  conditionId: string;
+  marketSlug: string;
+  outcome: string;
+  lookupKey: string;
+} {
+  const tokenId = String((position as any).tokenId || (position as any).token_id || '').trim();
+  const conditionId = String((position as any).conditionId || (position as any).condition_id || '').trim();
+  const marketSlug = String((position as any).marketSlug || (position as any).market_slug || '').trim();
+  const outcome = String((position as any).outcome || (position as any).outcome_name || '').trim().toUpperCase();
+  const lookupKey = tokenId || conditionId || marketSlug || `position:${position.id}`;
+
+  return { tokenId, conditionId, marketSlug, outcome, lookupKey };
+}
+
 function normalizeOutcome(value: unknown): string {
   return String(value ?? '').trim().toUpperCase();
 }
@@ -38,10 +54,19 @@ function parseOutcomes(value: unknown): string[] {
 }
 
 async function fetchResolvedOutcome(position: StoredPosition): Promise<string | null> {
+  const { tokenId, conditionId, marketSlug, lookupKey } = getPositionFields(position);
+
+  if (!tokenId && !conditionId && !marketSlug) {
+    console.warn(`[SETTLEMENT] skip position id=${position.id}: missing token_id / condition_id / market_slug`);
+    return null;
+  }
+
   try {
     const { data } = await axios.get<any[]>('https://data-api.polymarket.com/markets', {
       params: {
-        clob_token_ids: position.tokenId,
+        ...(tokenId ? { clob_token_ids: tokenId } : {}),
+        ...(conditionId ? { condition_ids: conditionId } : {}),
+        ...(marketSlug ? { slug: marketSlug } : {}),
         limit: 1,
       },
       timeout: 15_000,
@@ -68,7 +93,7 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
     for (const token of tokens) {
       const candidateId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
       const isWinner = token?.winner === true || token?.winning === true || token?.isWinner === true;
-      if (candidateId === position.tokenId && isWinner) {
+      if (candidateId === tokenId && isWinner) {
         return normalizeOutcome(token?.outcome || token?.label || token?.name);
       }
     }
@@ -78,23 +103,26 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
       for (let i = 0; i < tokens.length; i++) {
         const candidateId = String(tokens[i]?.token_id || tokens[i]?.tokenId || tokens[i]?.asset_id || tokens[i]?.id || '');
         const isWinner = tokens[i]?.winner === true || tokens[i]?.winning === true || tokens[i]?.isWinner === true;
-        if (candidateId === position.tokenId && isWinner) {
+        if (candidateId === tokenId && isWinner) {
           return outcomes[i] || null;
         }
       }
     }
   } catch (error: any) {
-    console.warn(`[SETTLEMENT] failed to fetch market resolution for tokenId=${position.tokenId}: ${error?.message || error}`);
+    console.warn(`[SETTLEMENT] failed to fetch market resolution for ${lookupKey}: ${error?.message || error}`);
   }
 
   return null;
 }
 
 function buildSettlementUpdate(position: StoredPosition, winningOutcome: string): Required<Pick<PositionEntry, 'status' | 'settledTs' | 'winningOutcome' | 'redeemable' | 'redeemAmount' | 'pnl' | 'pnlPct'>> {
-  const isWin = normalizeOutcome(position.outcome) === normalizeOutcome(winningOutcome);
-  const redeemAmount = isWin ? Number(position.entryShares || 0) : 0;
-  const pnl = isWin ? redeemAmount - Number(position.entryNotional || 0) : -Number(position.entryNotional || 0);
-  const pnlPct = Number(position.entryNotional || 0) > 0 ? (pnl / Number(position.entryNotional || 0)) * 100 : 0;
+  const { outcome } = getPositionFields(position);
+  const entryShares = Number((position as any).entryShares || (position as any).entry_shares || 0);
+  const entryNotional = Number((position as any).entryNotional || (position as any).entry_notional || 0);
+  const isWin = outcome === normalizeOutcome(winningOutcome);
+  const redeemAmount = isWin ? entryShares : 0;
+  const pnl = isWin ? redeemAmount - entryNotional : -entryNotional;
+  const pnlPct = entryNotional > 0 ? (pnl / entryNotional) * 100 : 0;
 
   return {
     status: isWin ? 'settled_win' : 'settled_lose',

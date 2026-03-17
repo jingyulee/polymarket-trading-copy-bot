@@ -27,3 +27,4 @@
 - feat: add positions_sim and positions_live
 - feat: add settlement updater
 - feat: add pnl and win rate stats
+- fix: support snake_case position fields in settlement updater
