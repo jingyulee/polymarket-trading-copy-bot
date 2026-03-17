@@ -10,3 +10,4 @@ build/
 .polymarket-api-creds
 *-lock.json
 .history
+.DS_Store
