@@ -55,6 +55,29 @@ function parseOutcomes(value: unknown): string[] {
   return [];
 }
 
+function parseOutcomePrices(value: unknown): number[] {
+  const normalizePrices = (items: unknown[]): number[] => items
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item));
+
+  if (Array.isArray(value)) {
+    return normalizePrices(value);
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return normalizePrices(parsed);
+      }
+    } catch {
+      return normalizePrices(value.split(',').map((item) => item.trim()));
+    }
+  }
+
+  return [];
+}
+
 async function fetchResolvedOutcome(position: StoredPosition): Promise<string | null> {
   const { tokenId, conditionId, marketSlug, lookupKey } = getPositionFields(position);
 
@@ -129,6 +152,19 @@ async function fetchResolvedOutcome(position: StoredPosition): Promise<string | 
         if (candidateId === tokenId && isWinner) {
           console.log(`[SETTLEMENT] token winner matched via ${resolutionSource}`);
           return outcomes[i] || null;
+        }
+      }
+    }
+
+    const isResolved = normalizeOutcome(market.umaResolutionStatus) === 'RESOLVED' || market.closed === true;
+    const outcomePrices = parseOutcomePrices(market.outcomePrices);
+    if (isResolved && outcomes.length > 0 && outcomePrices.length === outcomes.length) {
+      const winningIndex = outcomePrices.findIndex((price) => price >= 0.999);
+      if (winningIndex >= 0) {
+        const inferredWinner = outcomes[winningIndex] || null;
+        if (inferredWinner) {
+          console.log(`[SETTLEMENT] inferred winner from outcomePrices via ${resolutionSource}`);
+          return inferredWinner;
         }
       }
     }

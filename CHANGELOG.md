@@ -30,3 +30,4 @@
 - fix: support snake_case position fields in settlement updater
 - fix: use condition_id / market_slug for settlement resolution lookup instead of token_id
 - fix: use gamma-api markets endpoint in settlement updater
+- fix: infer winning outcome from outcomePrices in settlement updater
