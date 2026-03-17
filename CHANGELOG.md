@@ -33,3 +33,4 @@
 - fix: infer winning outcome from outcomePrices in settlement updater
 - feat: add telegram monitoring commands
 - feat: add telegram_commands.md documentation
+- improve: restructure telegram stats output into settled/open/overall sections

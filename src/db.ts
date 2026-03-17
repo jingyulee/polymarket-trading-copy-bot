@@ -66,13 +66,15 @@ export interface SkipReasonStat {
 export interface PerformanceStats {
   total_positions: number;
   open_positions: number;
+  open_entry_notional: number;
   settled_positions: number;
-  win_count: number;
-  lose_count: number;
-  win_rate_pct: number;
+  settled_win_count: number;
+  settled_lose_count: number;
+  settled_win_rate_pct: number;
+  settled_entry_notional: number;
+  settled_redeem_amount: number;
+  settled_pnl: number;
   total_entry_notional: number;
-  total_pnl: number;
-  total_redeem_amount: number;
 }
 
 const dbDir = path.resolve(process.cwd(), 'data');
@@ -304,12 +306,14 @@ function createPerformanceStatsStatement(tableName: 'positions_sim' | 'positions
     SELECT
       COUNT(*) AS total_positions,
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
+      COALESCE(SUM(CASE WHEN status = 'open' THEN entry_notional ELSE 0 END), 0) AS open_entry_notional,
       SUM(CASE WHEN status IN ('settled_win', 'settled_lose', 'redeemed') THEN 1 ELSE 0 END) AS settled_positions,
-      SUM(CASE WHEN status = 'settled_win' OR status = 'redeemed' THEN 1 ELSE 0 END) AS win_count,
-      SUM(CASE WHEN status = 'settled_lose' THEN 1 ELSE 0 END) AS lose_count,
-      COALESCE(SUM(entry_notional), 0) AS total_entry_notional,
-      COALESCE(SUM(pnl), 0) AS total_pnl,
-      COALESCE(SUM(redeem_amount), 0) AS total_redeem_amount
+      SUM(CASE WHEN status = 'settled_win' OR status = 'redeemed' THEN 1 ELSE 0 END) AS settled_win_count,
+      SUM(CASE WHEN status = 'settled_lose' THEN 1 ELSE 0 END) AS settled_lose_count,
+      COALESCE(SUM(CASE WHEN status IN ('settled_win', 'settled_lose', 'redeemed') THEN entry_notional ELSE 0 END), 0) AS settled_entry_notional,
+      COALESCE(SUM(CASE WHEN status IN ('settled_win', 'settled_lose', 'redeemed') THEN redeem_amount ELSE 0 END), 0) AS settled_redeem_amount,
+      COALESCE(SUM(CASE WHEN status IN ('settled_win', 'settled_lose', 'redeemed') THEN pnl ELSE 0 END), 0) AS settled_pnl,
+      COALESCE(SUM(entry_notional), 0) AS total_entry_notional
     FROM ${tableName}
   `);
 }
@@ -524,19 +528,22 @@ export function resolveLivePosition(positionId: number, entry: Required<Pick<Pos
 function normalizePerformanceStats(row: any): PerformanceStats {
   const total_positions = Number(row?.total_positions || 0);
   const open_positions = Number(row?.open_positions || 0);
+  const open_entry_notional = Number(row?.open_entry_notional || 0);
   const settled_positions = Number(row?.settled_positions || 0);
-  const win_count = Number(row?.win_count || 0);
-  const lose_count = Number(row?.lose_count || 0);
+  const settled_win_count = Number(row?.settled_win_count || 0);
+  const settled_lose_count = Number(row?.settled_lose_count || 0);
   return {
     total_positions,
     open_positions,
+    open_entry_notional,
     settled_positions,
-    win_count,
-    lose_count,
-    win_rate_pct: settled_positions > 0 ? (win_count / settled_positions) * 100 : 0,
+    settled_win_count,
+    settled_lose_count,
+    settled_win_rate_pct: settled_positions > 0 ? (settled_win_count / settled_positions) * 100 : 0,
+    settled_entry_notional: Number(row?.settled_entry_notional || 0),
+    settled_redeem_amount: Number(row?.settled_redeem_amount || 0),
+    settled_pnl: Number(row?.settled_pnl || 0),
     total_entry_notional: Number(row?.total_entry_notional || 0),
-    total_pnl: Number(row?.total_pnl || 0),
-    total_redeem_amount: Number(row?.total_redeem_amount || 0),
   };
 }
 

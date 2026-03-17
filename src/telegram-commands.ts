@@ -45,6 +45,11 @@ function formatUsd(value: number): string {
   return `${value.toFixed(2)} USDC`;
 }
 
+function formatSignedUsd(value: number): string {
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(2)} USDC`;
+}
+
 function formatPct(value: number): string {
   return `${value.toFixed(2)}%`;
 }
@@ -67,19 +72,25 @@ function formatTimestamp(value: number | null | undefined): string {
 function combinePerformanceStats(sim: PerformanceStats, live: PerformanceStats): PerformanceStats {
   const total_positions = sim.total_positions + live.total_positions;
   const open_positions = sim.open_positions + live.open_positions;
+  const open_entry_notional = sim.open_entry_notional + live.open_entry_notional;
   const settled_positions = sim.settled_positions + live.settled_positions;
-  const win_count = sim.win_count + live.win_count;
-  const lose_count = sim.lose_count + live.lose_count;
+  const settled_win_count = sim.settled_win_count + live.settled_win_count;
+  const settled_lose_count = sim.settled_lose_count + live.settled_lose_count;
+  const settled_entry_notional = sim.settled_entry_notional + live.settled_entry_notional;
+  const settled_redeem_amount = sim.settled_redeem_amount + live.settled_redeem_amount;
+  const settled_pnl = sim.settled_pnl + live.settled_pnl;
   return {
     total_positions,
     open_positions,
+    open_entry_notional,
     settled_positions,
-    win_count,
-    lose_count,
-    win_rate_pct: settled_positions > 0 ? (win_count / settled_positions) * 100 : 0,
+    settled_win_count,
+    settled_lose_count,
+    settled_win_rate_pct: settled_positions > 0 ? (settled_win_count / settled_positions) * 100 : 0,
+    settled_entry_notional,
+    settled_redeem_amount,
+    settled_pnl,
     total_entry_notional: sim.total_entry_notional + live.total_entry_notional,
-    total_pnl: sim.total_pnl + live.total_pnl,
-    total_redeem_amount: sim.total_redeem_amount + live.total_redeem_amount,
   };
 }
 
@@ -90,13 +101,21 @@ function formatPerformanceMessage(title: string, stats: PerformanceStats): strin
 
   return [
     title,
-    `總筆數: ${stats.total_positions}`,
-    `未結算: ${stats.open_positions}`,
-    `已結算: ${stats.settled_positions}`,
-    `🎯 勝率: ${formatPct(stats.win_rate_pct)}`,
+    '',
+    '已結算',
+    `筆數: ${stats.settled_positions}`,
+    `🎯 勝率: ${formatPct(stats.settled_win_rate_pct)}`,
+    `💵 投入: ${formatUsd(stats.settled_entry_notional)}`,
+    `🏦 redeem: ${formatUsd(stats.settled_redeem_amount)}`,
+    `📈 pnl: ${formatSignedUsd(stats.settled_pnl)}`,
+    '',
+    '未結算',
+    `筆數: ${stats.open_positions}`,
+    `💵 佔用資金: ${formatUsd(stats.open_entry_notional)}`,
+    '',
+    '整體',
     `💵 總投入: ${formatUsd(stats.total_entry_notional)}`,
-    `總 redeem: ${formatUsd(stats.total_redeem_amount)}`,
-    `📈 總 pnl: ${formatUsd(stats.total_pnl)}`,
+    `📊 當前 pnl（已結算）: ${formatSignedUsd(stats.settled_pnl)}`,
   ].join('\n');
 }
 
