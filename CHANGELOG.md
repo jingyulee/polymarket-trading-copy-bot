@@ -39,3 +39,5 @@
 - improve: unify telegram trade notification layout for dry run and live
 - feat: add unified decision header for trade notifications
 - fix: restore fill price and fill size in live trade notification
+- feat: merge performance tracking system (trade_log, positions, market_lock, telegram stats)
+- note: live fill display will be completed in next iteration
