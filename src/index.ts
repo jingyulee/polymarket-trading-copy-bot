@@ -5,7 +5,7 @@ import type { Trade } from './monitor.js';
 import { TradeExecutor } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
-import { applyFilters, getMarketLockKey } from './filter.js';
+import { applyFilters, applyLightweightFilters, getMarketLockKey } from './filter.js';
 import {
   getSkipStatsByWindow,
   getSessionStats,
@@ -189,6 +189,21 @@ class PolymarketCopyBot {
     console.log(`   Token ID: ${trade.tokenId}`);
     console.log(`   Age: ${sourceAgeMs}ms`);
     console.log('='.repeat(50));
+
+    const lightweightFilterResult = applyLightweightFilters(trade, {
+      now: Date.now(),
+    });
+
+    if (!lightweightFilterResult.pass) {
+      this.recordTradeLog(trade, {
+        action: 'skip',
+        reason: lightweightFilterResult.reason,
+        sourceAgeMs,
+      });
+      console.log(`⚠️  Lightweight filter skipped trade: ${lightweightFilterResult.reason}`);
+      this.printStats();
+      return;
+    }
 
     if (this.wsMonitor) {
       await this.wsMonitor.subscribeToMarket(trade.tokenId);

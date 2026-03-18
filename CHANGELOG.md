@@ -80,3 +80,4 @@
 - feat: add maker fallback bid / spread / depth guards
 - chore: improve orderbook cache diagnostics and null-safe market snapshot
 - fix: resolve prewarm token subscriptions for configured symbols
+- perf: move lightweight market filters before orderbook subscription

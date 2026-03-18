@@ -80,46 +80,9 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
     asksDepth: Number.isFinite(asksDepth) ? asksDepth : undefined,
   };
 
-  if (config.trading.copyOnlyBuy && trade.side !== 'BUY') {
-    return { pass: false, reason: 'skip_sell_trade' };
-  }
-
-  if (!Number.isFinite(sourcePrice) || sourcePrice < config.trading.minSourcePrice || sourcePrice > config.trading.maxSourcePrice) {
-    return { pass: false, reason: 'source_price_out_of_range' };
-  }
-
-  if (!Number.isFinite(sourceSizeUsd) || sourceSizeUsd < config.trading.minSourceTradeUsd) {
-    return { pass: false, reason: 'source_trade_usd_too_small' };
-  }
-
-  if (sourceAgeMs > config.trading.maxSourceTradeAgeMs) {
-    return { pass: false, reason: 'stale_trade' };
-  }
-
-  if (config.trading.marketScope === 'crypto-only') {
-    const marketTexts = [
-      trade.market,
-      trade.marketSlug,
-      trade.title,
-      trade.outcome,
-      trade.outcomeName,
-    ].filter(Boolean) as string[];
-
-    if (marketTexts.length === 0) {
-      return { pass: false, reason: 'market_metadata_missing' };
-    }
-
-    const isCryptoMarket = marketTexts.some(textContainsCrypto);
-    if (!isCryptoMarket) {
-      return { pass: false, reason: 'non_crypto_market' };
-    }
-
-    if (config.trading.onlyHighLiquiditySymbols) {
-      const isHighLiquiditySymbol = marketTexts.some(textContainsHighLiquiditySymbol);
-      if (!isHighLiquiditySymbol) {
-        return { pass: false, reason: 'not_high_liquidity_symbol', details };
-      }
-    }
+  const lightweightResult = applyLightweightFilters(trade, context);
+  if (!lightweightResult.pass) {
+    return lightweightResult;
   }
 
   const marketLockKey = getMarketLockKey(trade);
@@ -159,6 +122,69 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
     if (Number.isFinite(spread) && Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > 0 && bestAsk > 0) {
       if (spread > config.trading.maxSpreadForEntry) {
         return { pass: false, reason: 'spread_too_wide', details };
+      }
+    }
+  }
+
+  return { pass: true, reason: 'pass' };
+}
+
+export function applyLightweightFilters(trade: FilterTrade, context: FilterContext = {}): FilterResult {
+  const now = context.now ?? Date.now();
+  const sourcePrice = Number(trade.price);
+  const sourceSizeUsd = Number(trade.size);
+  const sourceAgeMs = Math.max(0, now - Number(trade.timestamp || now));
+  const bestBid = Number(context.bestBid);
+  const bestAsk = Number(context.bestAsk);
+  const spread = Number(context.spread);
+  const bidsDepth = Number(context.bidsDepth);
+  const asksDepth = Number(context.asksDepth);
+  const details = {
+    bestBid: Number.isFinite(bestBid) ? bestBid : undefined,
+    bestAsk: Number.isFinite(bestAsk) ? bestAsk : undefined,
+    spread: Number.isFinite(spread) ? spread : undefined,
+    bidsDepth: Number.isFinite(bidsDepth) ? bidsDepth : undefined,
+    asksDepth: Number.isFinite(asksDepth) ? asksDepth : undefined,
+  };
+
+  if (config.trading.copyOnlyBuy && trade.side !== 'BUY') {
+    return { pass: false, reason: 'skip_sell_trade' };
+  }
+
+  if (!Number.isFinite(sourcePrice) || sourcePrice < config.trading.minSourcePrice || sourcePrice > config.trading.maxSourcePrice) {
+    return { pass: false, reason: 'source_price_out_of_range' };
+  }
+
+  if (!Number.isFinite(sourceSizeUsd) || sourceSizeUsd < config.trading.minSourceTradeUsd) {
+    return { pass: false, reason: 'source_trade_usd_too_small' };
+  }
+
+  if (sourceAgeMs > config.trading.maxSourceTradeAgeMs) {
+    return { pass: false, reason: 'stale_trade' };
+  }
+
+  if (config.trading.marketScope === 'crypto-only') {
+    const marketTexts = [
+      trade.market,
+      trade.marketSlug,
+      trade.title,
+      trade.outcome,
+      trade.outcomeName,
+    ].filter(Boolean) as string[];
+
+    if (marketTexts.length === 0) {
+      return { pass: false, reason: 'market_metadata_missing' };
+    }
+
+    const isCryptoMarket = marketTexts.some(textContainsCrypto);
+    if (!isCryptoMarket) {
+      return { pass: false, reason: 'non_crypto_market' };
+    }
+
+    if (config.trading.onlyHighLiquiditySymbols) {
+      const isHighLiquiditySymbol = marketTexts.some(textContainsHighLiquiditySymbol);
+      if (!isHighLiquiditySymbol) {
+        return { pass: false, reason: 'not_high_liquidity_symbol', details };
       }
     }
   }
