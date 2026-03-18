@@ -41,3 +41,5 @@
 - fix: restore fill price and fill size in live trade notification
 - feat: merge performance tracking system (trade_log, positions, market_lock, telegram stats)
 - note: live fill display will be completed in next iteration
+- fix: use funder address for balance and allowance checks in proxy mode
+- improve: clarify signer and funder initialization logs

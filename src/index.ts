@@ -52,7 +52,7 @@ class PolymarketCopyBot {
   async initialize(): Promise<void> {
     console.log('🤖 Polymarket Copy Trading Bot');
     console.log('================================');
-    console.log(`Target wallet: ${config.targetWallet}`);
+    console.log(`Target wallet: ${config.targetWallet} (from TARGET_WALLET)`);
     console.log(`Position multiplier: ${config.trading.positionSizeMultiplier * 100}%`);
     console.log(`Max trade size: ${config.trading.maxTradeSize} USDC`);
     console.log(`Max USD per order: ${config.trading.maxUsdPerOrder} USDC`);

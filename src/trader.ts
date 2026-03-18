@@ -73,13 +73,34 @@ export class TradeExecutor {
       config.polymarketGeoToken || undefined
     );
   }
+
+  private getSignerAddress(): string {
+    return this.wallet.address;
+  }
+
+  private getFunderAddress(): string {
+    return config.auth.funderAddress || this.wallet.address;
+  }
+
+  private getFundsCheckAddress(): string {
+    return config.auth.sigType !== 0 && config.auth.funderAddress
+      ? config.auth.funderAddress
+      : this.wallet.address;
+  }
   
   async initialize(): Promise<void> {
     console.log(`🔧 Initializing trader...`);
     const { sigType, funderAddress } = config.auth;
-    const funder = funderAddress || this.wallet.address;
-    console.log(`   Signing wallet: ${this.wallet.address}`);
-    console.log(`   Funder: ${funder}`);
+    const signer = this.getSignerAddress();
+    const funder = funderAddress || signer;
+    const fundsCheckWallet = this.getFundsCheckAddress();
+    console.log(`   Signing wallet: ${signer} (from WALLET_PRIVATE_KEY)`);
+    console.log(`   Funder: ${funder} (${funderAddress ? 'from PROXY_WALLET_ADDRESS' : 'fallback to signer'})`);
+    console.log(`   Funds/allowance check wallet: ${fundsCheckWallet}`);
+    console.log(`   Execution signer: ${signer}`);
+    if (signer.toLowerCase() !== funder.toLowerCase()) {
+      console.log(`   ⚠️  signer/funder mismatch (proxy mode)`);
+    }
     console.log(`   Signature type: ${sigType}`);
 
     try {
@@ -158,9 +179,7 @@ export class TradeExecutor {
   }
 
   getAccountAddress(): string {
-    return config.auth.sigType !== 0 && config.auth.funderAddress
-      ? config.auth.funderAddress
-      : this.wallet.address;
+    return this.getFundsCheckAddress();
   }
 
   getCacheStats(): { size: number; items: string[] } {
@@ -618,25 +637,26 @@ export class TradeExecutor {
     try {
       const metadata = await this.getMarketMetadata(tokenId);
       const exchangeAddress = metadata.negRisk ? config.contracts.negRiskExchange : config.contracts.exchange;
+      const ownerAddress = this.getFundsCheckAddress();
 
       const usdc = new ethers.Contract(config.contracts.usdc, this.ERC20_ABI, this.wallet);
       const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
       const decimals = await usdc.decimals();
       const required = ethers.utils.parseUnits(requiredAmount.toString(), decimals);
 
-      const balance = await usdc.balanceOf(this.wallet.address);
+      const balance = await usdc.balanceOf(ownerAddress);
       if (balance.lt(required)) {
         const bal = ethers.utils.formatUnits(balance, decimals);
         throw new Error(`not enough balance / allowance (USDC.e balance ${bal} < required ${requiredAmount})`);
       }
 
-      const allowanceCtf = await usdc.allowance(this.wallet.address, config.contracts.ctf);
+      const allowanceCtf = await usdc.allowance(ownerAddress, config.contracts.ctf);
       if (allowanceCtf.lt(required)) {
         const allow = ethers.utils.formatUnits(allowanceCtf, decimals);
         throw new Error(`not enough balance / allowance (USDC.e allowance to CTF ${allow} < required ${requiredAmount})`);
       }
 
-      const allowanceEx = await usdc.allowance(this.wallet.address, exchangeAddress);
+      const allowanceEx = await usdc.allowance(ownerAddress, exchangeAddress);
       if (allowanceEx.lt(required)) {
         const allow = ethers.utils.formatUnits(allowanceEx, decimals);
         throw new Error(`not enough balance / allowance (USDC.e allowance to Exchange ${allow} < required ${requiredAmount})`);
@@ -652,7 +672,7 @@ export class TradeExecutor {
         throw new Error(`not enough balance / allowance (CLOB allowance to Exchange is 0)`);
       }
 
-      const approved = await ctf.isApprovedForAll(this.wallet.address, exchangeAddress);
+      const approved = await ctf.isApprovedForAll(ownerAddress, exchangeAddress);
       if (!approved) {
         console.log('   ⚠️  CTF approval missing for exchange (required for SELLs)');
       }
@@ -697,6 +717,7 @@ export class TradeExecutor {
   }
   private async validateWalletReadiness(): Promise<void> {
     console.log('🔐 Checking wallet readiness without sending approval transactions...');
+    const ownerAddress = this.getFundsCheckAddress();
 
     const usdc = new ethers.Contract(config.contracts.usdc, this.ERC20_ABI, this.wallet);
     const ctf = new ethers.Contract(config.contracts.ctf, this.CTF_ABI, this.wallet);
@@ -704,7 +725,7 @@ export class TradeExecutor {
     const maticBal = await this.provider.getBalance(this.wallet.address);
     const maticAmount = parseFloat(ethers.utils.formatEther(maticBal));
     if (maticAmount < 0.05) {
-      console.log(`   ⚠️  Low POL/MATIC for gas: ${maticAmount.toFixed(4)}`);
+      console.log(`   ⚠️  Low POL/MATIC for signer gas wallet ${this.wallet.address}: ${maticAmount.toFixed(4)}`);
     }
 
     const decimals = await usdc.decimals();
@@ -717,7 +738,7 @@ export class TradeExecutor {
     ];
 
     for (const spender of usdcSpenders) {
-      const allowance = await usdc.allowance(this.wallet.address, spender.address);
+      const allowance = await usdc.allowance(ownerAddress, spender.address);
       if (allowance.lt(minAllowance)) {
         const formatted = ethers.utils.formatUnits(allowance, decimals);
         console.log(`   ⚠️  Missing manual USDC.e approval for ${spender.name} (${spender.address}), current allowance=${formatted}`);
@@ -732,7 +753,7 @@ export class TradeExecutor {
     ];
 
     for (const operator of operators) {
-      const approved = await ctf.isApprovedForAll(this.wallet.address, operator.address);
+      const approved = await ctf.isApprovedForAll(ownerAddress, operator.address);
       if (!approved) {
         console.log(`   ⚠️  Missing manual CTF operator approval for ${operator.name} (${operator.address})`);
       } else {
