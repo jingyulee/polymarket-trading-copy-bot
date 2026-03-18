@@ -39,6 +39,7 @@ class PolymarketCopyBot {
     tradesDetected: 0,
     tradesCopied: 0,
     tradesFailed: 0,
+    tradesSkipped: 0,
     totalVolume: 0,
   };
 
@@ -318,6 +319,28 @@ class PolymarketCopyBot {
       }));
       this.printStats();
     } catch (error: any) {
+      const errorMsg = error?.message || '';
+      if (errorMsg.startsWith('SKIP:')) {
+        const reason = errorMsg.substring(5); // remove 'SKIP:'
+        this.stats.tradesSkipped++;
+        this.recordTradeLog(trade, {
+          action: 'skip',
+          reason,
+          copyNotional,
+          sourceAgeMs,
+        });
+        console.log(`⏭️  Skipped trade: ${reason}`);
+        await sendTelegram(formatTradeMessage(trade, {
+          mode: 'LIVE',
+          decision: 'SKIP',
+          copyNotional,
+          reason,
+          sourceAgeMs,
+        }));
+        this.printStats();
+        return;
+      }
+
       this.stats.tradesFailed++;
       if (config.trading.oneTradePerMarket) {
         this.marketLocks.delete(marketLockKey);

@@ -9,6 +9,13 @@
 - 審查期間未在 repo 原始碼中發現明確的 `.ssh` 竊取、`.env` 外傳、任意 shell 執行、惡意 webhook、或將資金轉往不明地址的硬編碼邏輯。
 - 建議淘汰原 repo 的信任鏈，僅保留已人工審閱且可驗證的業務邏輯，作為後續二次開發基線。
 
+# 2026-03-19 Execution Debug and Skip Logic
+
+- fix: treat empty ask/bid orderbook as skip instead of fail, with reasons `no_asks_in_orderbook` or `no_bids_in_orderbook`
+- add debug logs in executeLimitOrder and executeMarketOrder for execution details: tokenId, market, source side/outcome, orderbook stats, best prices, top 3 bids/asks
+- update error handling to count skips in stats and trade_log instead of fails
+- prevent retries for skip conditions
+
 # 2026-03-19 CLOB Allowance Parsing Fix
 
 - fix: parse clob allowances map by exchange address in validateBalance()

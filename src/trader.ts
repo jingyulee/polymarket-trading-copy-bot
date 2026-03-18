@@ -426,13 +426,14 @@ export class TradeExecutor {
     return Math.max(price * (1 - slippage), 0.01);
   }
 
-  private ensureLiquidity(orderbook: any, side: 'BUY' | 'SELL'): void {
+  private ensureLiquidity(orderbook: any, side: 'BUY' | 'SELL'): boolean {
     if (side === 'BUY' && orderbook.asks.length === 0) {
-      throw new Error('No asks available in orderbook');
+      return false;
     }
     if (side === 'SELL' && orderbook.bids.length === 0) {
-      throw new Error('No bids available in orderbook');
+      return false;
     }
+    return true;
   }
 
   async executeCopyTrade(
@@ -492,7 +493,13 @@ export class TradeExecutor {
   }
 
   private isRetryableError(error: any): boolean {
-    const errorMsg = error?.message?.toLowerCase() || '';
+    const errorMsg = error?.message || '';
+
+    if (errorMsg.startsWith('SKIP:')) {
+      return false;
+    }
+
+    const lowerMsg = errorMsg.toLowerCase();
     const responseData = error?.response?.data?.error?.toLowerCase() || '';
     const responseStatus = error?.response?.status;
 
@@ -558,7 +565,22 @@ export class TradeExecutor {
       this.getOrderOptions(originalTrade.tokenId),
     ]);
 
-    this.ensureLiquidity(orderbook, originalTrade.side);
+    console.log(`[DEBUG] Execution details:`);
+    console.log(`   tokenId: ${originalTrade.tokenId}`);
+    console.log(`   market: ${originalTrade.market}`);
+    console.log(`   source side: ${originalTrade.side}`);
+    console.log(`   source outcome: ${originalTrade.outcome} (${originalTrade.outcomeName || 'no name'})`);
+    console.log(`   orderbook bids.length: ${orderbook.bids?.length || 0}`);
+    console.log(`   orderbook asks.length: ${orderbook.asks?.length || 0}`);
+    console.log(`   best bid: ${orderbook.bids?.[0]?.price || 'N/A'}`);
+    console.log(`   best ask: ${orderbook.asks?.[0]?.price || 'N/A'}`);
+    console.log(`   top 3 bids: ${JSON.stringify(orderbook.bids?.slice(0, 3) || [])}`);
+    console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
+
+    if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const reason = originalTrade.side === 'BUY' ? 'no_asks_in_orderbook' : 'no_bids_in_orderbook';
+      throw new Error(`SKIP:${reason}`);
+    }
 
     const { slippageTolerance } = config.trading;
     const bestPrice = this.getBestPrice(orderbook, originalTrade.side, originalTrade.price);
@@ -610,7 +632,22 @@ export class TradeExecutor {
       this.getOrderOptions(originalTrade.tokenId),
     ]);
 
-    this.ensureLiquidity(orderbook, originalTrade.side);
+    console.log(`[DEBUG] Execution details:`);
+    console.log(`   tokenId: ${originalTrade.tokenId}`);
+    console.log(`   market: ${originalTrade.market}`);
+    console.log(`   source side: ${originalTrade.side}`);
+    console.log(`   source outcome: ${originalTrade.outcome} (${originalTrade.outcomeName || 'no name'})`);
+    console.log(`   orderbook bids.length: ${orderbook.bids?.length || 0}`);
+    console.log(`   orderbook asks.length: ${orderbook.asks?.length || 0}`);
+    console.log(`   best bid: ${orderbook.bids?.[0]?.price || 'N/A'}`);
+    console.log(`   best ask: ${orderbook.asks?.[0]?.price || 'N/A'}`);
+    console.log(`   top 3 bids: ${JSON.stringify(orderbook.bids?.slice(0, 3) || [])}`);
+    console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
+
+    if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const reason = originalTrade.side === 'BUY' ? 'no_asks_in_orderbook' : 'no_bids_in_orderbook';
+      throw new Error(`SKIP:${reason}`);
+    }
 
     const { slippageTolerance } = config.trading;
     const bestPrice = this.getBestPrice(orderbook, originalTrade.side, originalTrade.price);
