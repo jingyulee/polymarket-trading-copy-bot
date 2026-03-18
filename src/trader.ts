@@ -63,11 +63,27 @@ export class TradeExecutor {
 
     const { sigType, funderAddress } = config.auth;
     const funder = funderAddress || this.wallet.address;
+    const apiCreds = config.clobApiKey
+      ? {
+        key: config.clobApiKey,
+        secret: config.clobApiSecret,
+        passphrase: config.clobApiPassphrase,
+      }
+      : undefined;
+
+    if (apiCreds) {
+      this.apiCreds = {
+        apiKey: config.clobApiKey,
+        secret: config.clobApiSecret,
+        passphrase: config.clobApiPassphrase,
+      };
+    }
+
     this.clobClient = new ClobClient(
       'https://clob.polymarket.com',
       137,
       this.wallet,
-      undefined,
+      apiCreds,
       sigType,
       funder,
       config.polymarketGeoToken || undefined
@@ -87,7 +103,7 @@ export class TradeExecutor {
       ? config.auth.funderAddress
       : this.wallet.address;
   }
-  
+
   async initialize(): Promise<void> {
     console.log(`🔧 Initializing trader...`);
     const { sigType, funderAddress } = config.auth;
@@ -102,9 +118,14 @@ export class TradeExecutor {
       console.log(`   ⚠️  signer/funder mismatch (proxy mode)`);
     }
     console.log(`   Signature type: ${sigType}`);
+    console.log(`   CLOB API key (first 6): ${config.clobApiKey?.slice(0, 6) || 'dynamic'}`);
 
     try {
-      await this.deriveAndReinitApiKeys(funder);
+      if (!config.clobApiKey) {
+        await this.deriveAndReinitApiKeys(funder);
+      } else {
+        console.log('🔑 Using static CLOB API credentials from env');
+      }
       await this.validateApiCredentials();
     } catch (error: any) {
       console.error(`❌ Failed to initialize API credentials:`, error.message);
@@ -131,9 +152,9 @@ export class TradeExecutor {
   private async validateApiCredentials(): Promise<void> {
     const result: any = await this.clobClient.getApiKeys();
     if (result?.error || result?.status >= 400) {
-      throw new Error(`Invalid generated API credentials: ${result?.error || `status ${result?.status}`}`);
+      throw new Error(`Invalid CLOB API credentials: ${result?.error || `status ${result?.status}`}`);
     }
-    console.log(`✅ Generated API credentials validated`);
+    console.log(`✅ CLOB API credentials validated`);
   }
 
   private async deriveAndReinitApiKeys(funderAddress: string): Promise<void> {
@@ -193,7 +214,7 @@ export class TradeExecutor {
     this.marketCache.clear();
     console.log('🗑️  Market cache cleared');
   }
-  
+
   calculateCopySize(originalSize: number): number {
     const { positionSizeMultiplier, maxTradeSize, minTradeSize, orderType, maxUsdPerOrder } = config.trading;
     let size = originalSize * positionSizeMultiplier;
@@ -202,7 +223,7 @@ export class TradeExecutor {
     size = Math.max(size, marketMin);
     return Math.round(size * 100) / 100;
   }
-  
+
   calculateCopyShares(originalSizeUsdc: number, price: number): number {
     const notional = this.calculateCopySize(originalSizeUsdc);
     return this.calculateSharesFromNotional(notional, price);
@@ -413,7 +434,7 @@ export class TradeExecutor {
       throw new Error('No bids available in orderbook');
     }
   }
-  
+
   async executeCopyTrade(
     originalTrade: Trade,
     copyNotionalOverride?: number
@@ -663,13 +684,27 @@ export class TradeExecutor {
       }
 
       const clobBal = await this.clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      console.log('[DEBUG] getBalanceAllowance raw =', JSON.stringify(clobBal, null, 2));
+      console.log('[DEBUG] signer =', this.getSignerAddress());
+      console.log('[DEBUG] funder =', this.getFunderAddress());
+      console.log('[DEBUG] fundsCheck =', this.getFundsCheckAddress());
+
       const clobBalance = parseFloat(clobBal?.balance || '0') / 1_000_000;
       if (clobBalance < requiredAmount) {
         throw new Error(`not enough balance / allowance (CLOB balance ${clobBalance} < required ${requiredAmount})`);
       }
-      const clobAllowance = clobBal?.allowance ?? '0';
-      if (clobAllowance === '0') {
-        throw new Error(`not enough balance / allowance (CLOB allowance to Exchange is 0)`);
+      console.log('[DEBUG] current exchangeAddress =', exchangeAddress);
+      const allowancesMap = (clobBal as any)?.allowances ?? {};
+      const exchangeKey = Object.keys(allowancesMap).find(
+        (key) => key.toLowerCase() === exchangeAddress.toLowerCase()
+      );
+      const resolvedClobAllowance =
+        (exchangeKey ? allowancesMap[exchangeKey] : undefined) ??
+        clobBal?.allowance ??
+        '0';
+      console.log('[DEBUG] resolved clob allowance =', resolvedClobAllowance);
+      if (resolvedClobAllowance === '0') {
+        throw new Error(`not enough balance / allowance (CLOB allowance to Exchange is 0 for ${exchangeAddress})`);
       }
 
       const approved = await ctf.isApprovedForAll(ownerAddress, exchangeAddress);
@@ -682,8 +717,8 @@ export class TradeExecutor {
       throw error;
     }
   }
-  
-  
+
+
   async getPositions(): Promise<any[]> {
     try {
       const user = config.auth.sigType !== 0 && config.auth.funderAddress
@@ -698,7 +733,7 @@ export class TradeExecutor {
       return [];
     }
   }
-  
+
   async cancelAllOrders(): Promise<void> {
     try {
       await this.clobClient.cancelAll();

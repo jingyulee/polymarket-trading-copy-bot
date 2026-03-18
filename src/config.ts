@@ -32,6 +32,9 @@ export const config = {
   targetWallet: process.env.TARGET_WALLET || '',
   privateKey: process.env.WALLET_PRIVATE_KEY || '',
   polymarketGeoToken: process.env.POLYMARKET_GEO_TOKEN || '',
+  clobApiKey: process.env.CLOB_API_KEY || '',
+  clobApiSecret: process.env.CLOB_API_SECRET || '',
+  clobApiPassphrase: process.env.CLOB_API_PASSPHRASE || '',
   rpcUrl: process.env.RPC_URL || 'https://polygon-rpc.com',
   chainId: 137,
 
@@ -103,7 +106,17 @@ export function validateConfig(): void {
     }
   }
 
-  console.log('ℹ️  API credentials will be derived/generated from WALLET_PRIVATE_KEY at startup');
+  const hasAnyClobCredential = Boolean(config.clobApiKey || config.clobApiSecret || config.clobApiPassphrase);
+  const hasAllClobCredentials = Boolean(config.clobApiKey && config.clobApiSecret && config.clobApiPassphrase);
+  if (hasAnyClobCredential && !hasAllClobCredentials) {
+    throw new Error('CLOB_API_KEY, CLOB_API_SECRET, and CLOB_API_PASSPHRASE must all be set together');
+  }
+
+  console.log(
+    hasAllClobCredentials
+      ? 'ℹ️  Using static CLOB API credentials from env'
+      : 'ℹ️  CLOB API credentials not provided; will derive/create from WALLET_PRIVATE_KEY at startup'
+  );
 
   const { sigType, funderAddress } = config.auth;
   if ((sigType === 1 || sigType === 2) && !funderAddress) {

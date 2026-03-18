@@ -9,6 +9,12 @@
 - 審查期間未在 repo 原始碼中發現明確的 `.ssh` 竊取、`.env` 外傳、任意 shell 執行、惡意 webhook、或將資金轉往不明地址的硬編碼邏輯。
 - 建議淘汰原 repo 的信任鏈，僅保留已人工審閱且可驗證的業務邏輯，作為後續二次開發基線。
 
+# 2026-03-19 CLOB Allowance Parsing Fix
+
+- fix: parse clob allowances map by exchange address in validateBalance()
+- add debug logs for current exchangeAddress and resolved clob allowance
+- update error message to include exchangeAddress for better debugging
+
 # 2026-03-17 v32 Sharky 策略整合
 
 - 整合 v32 strategy filters，加入 BUY only、來源價格區間、30 秒 stale trade guard、crypto-only market filter、10 bps slippage guard、價格偏離保護與單市場單次交易鎖。
