@@ -596,9 +596,19 @@ export class TradeExecutor {
       return null;
     }
 
+    const bestBid = Number(orderbook?.bids?.[0]?.price || 0);
+    const bestAsk = Number(orderbook?.asks?.[0]?.price || 0);
+
+    console.log('[MakerFallback Market Snapshot]', {
+      bestBid,
+      bestAsk,
+      spread: bestAsk - bestBid,
+      bidsDepth: orderbook?.bids?.length || 0,
+      asksDepth: orderbook?.asks?.length || 0
+    });
+
     console.log('⚠️  No asks available, trying maker fallback');
 
-    const bestBid = Number(orderbook?.bids?.[0]?.price);
     if (!Number.isFinite(bestBid) || bestBid <= 0) {
       console.log('   No best bid available; skipping maker fallback');
       throw new Error('SKIP:no_bids_no_asks_orderbook');
