@@ -95,7 +95,10 @@ export const config = {
     wsAssetIds: parseCsv(process.env.WS_ASSET_IDS),
     wsMarketIds: parseCsv(process.env.WS_MARKET_IDS),
     enableOrderbookPrewarm: parseBoolean(process.env.ENABLE_ORDERBOOK_PREWARM, true),
-    prewarmSymbols: parseCsv(process.env.PREWARM_SYMBOLS || 'btc,bitcoin,eth,ethereum,sol,solana').map((v) => v.toLowerCase()),
+    prewarmSymbols: (process.env.PREWARM_SYMBOLS || 'btc,bitcoin,eth,ethereum,sol,solana')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
     orderbookCacheTtlMs: parseNumber(process.env.ORDERBOOK_CACHE_TTL_MS, 5000),
     redeemCheckIntervalMs: Number(process.env.REDEEM_CHECK_INTERVAL_MS || 60000),
     settlementCheckIntervalMs: Number(process.env.SETTLEMENT_CHECK_INTERVAL_MS || 60000),
@@ -136,4 +139,8 @@ export function validateConfig(): void {
   console.log('✅ Configuration validated');
   const authLabel = sigType === 0 ? 'EOA' : sigType === 1 ? 'Poly Proxy' : 'Poly Polymorphic';
   console.log(`   Auth: ${authLabel} (signature type ${sigType})`);
+  console.log(
+    `   Orderbook prewarm: ${config.monitoring.enableOrderbookPrewarm ? 'enabled' : 'disabled'} ` +
+    `(ttl=${config.monitoring.orderbookCacheTtlMs}ms, symbols=${config.monitoring.prewarmSymbols.join(',') || 'none'})`
+  );
 }
