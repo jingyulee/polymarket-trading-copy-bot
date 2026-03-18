@@ -560,16 +560,26 @@ export class TradeExecutor {
   private async executeLimitOrder(originalTrade: Trade, copyNotional: number): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
-    const [orderbook, orderOpts] = await Promise.all([
-      this.clobClient.getOrderBook(originalTrade.tokenId),
-      this.getOrderOptions(originalTrade.tokenId),
-    ]);
+    let orderbook;
+    try {
+      orderbook = await this.clobClient.getOrderBook(originalTrade.tokenId);
+    } catch (error: any) {
+      if (error?.response?.status === 404 && error?.response?.data?.error?.includes('No orderbook exists for the requested token id')) {
+        throw new Error(`SKIP:no_orderbook_exists`);
+      }
+      throw error;
+    }
+    orderbook = orderbook || { bids: [], asks: [] };
+
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
 
     console.log(`[DEBUG] Execution details:`);
     console.log(`   tokenId: ${originalTrade.tokenId}`);
     console.log(`   market: ${originalTrade.market}`);
     console.log(`   source side: ${originalTrade.side}`);
     console.log(`   source outcome: ${originalTrade.outcome} (${originalTrade.outcomeName || 'no name'})`);
+    const canonicalOutcome = await this.getOutcomeLabel(originalTrade.tokenId);
+    console.log(`   canonical outcome: ${canonicalOutcome}`);
     console.log(`   orderbook bids.length: ${orderbook.bids?.length || 0}`);
     console.log(`   orderbook asks.length: ${orderbook.asks?.length || 0}`);
     console.log(`   best bid: ${orderbook.bids?.[0]?.price || 'N/A'}`);
@@ -627,16 +637,26 @@ export class TradeExecutor {
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
-    const [orderbook, orderOpts] = await Promise.all([
-      this.clobClient.getOrderBook(originalTrade.tokenId),
-      this.getOrderOptions(originalTrade.tokenId),
-    ]);
+    let orderbook;
+    try {
+      orderbook = await this.clobClient.getOrderBook(originalTrade.tokenId);
+    } catch (error: any) {
+      if (error?.response?.status === 404 && error?.response?.data?.error?.includes('No orderbook exists for the requested token id')) {
+        throw new Error(`SKIP:no_orderbook_exists`);
+      }
+      throw error;
+    }
+    orderbook = orderbook || { bids: [], asks: [] };
+
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
 
     console.log(`[DEBUG] Execution details:`);
     console.log(`   tokenId: ${originalTrade.tokenId}`);
     console.log(`   market: ${originalTrade.market}`);
     console.log(`   source side: ${originalTrade.side}`);
     console.log(`   source outcome: ${originalTrade.outcome} (${originalTrade.outcomeName || 'no name'})`);
+    const canonicalOutcome = await this.getOutcomeLabel(originalTrade.tokenId);
+    console.log(`   canonical outcome: ${canonicalOutcome}`);
     console.log(`   orderbook bids.length: ${orderbook.bids?.length || 0}`);
     console.log(`   orderbook asks.length: ${orderbook.asks?.length || 0}`);
     console.log(`   best bid: ${orderbook.bids?.[0]?.price || 'N/A'}`);
