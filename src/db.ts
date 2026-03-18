@@ -2,7 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
 
-export type TradeLogAction = 'skip' | 'dry_run' | 'copy_success' | 'copy_fail';
+export type TradeLogAction =
+  | 'skip'
+  | 'dry_run'
+  | 'copy_success'
+  | 'copy_fail'
+  | 'maker_fallback_placed'
+  | 'maker_fallback_filled'
+  | 'maker_fallback_cancelled';
 
 export interface TradeLogEntry {
   ts?: number;

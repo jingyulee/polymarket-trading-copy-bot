@@ -3,6 +3,7 @@ import axios from 'axios';
 import { ClobClient, Side, OrderType, AssetType } from '@polymarket/clob-client';
 import { config } from './config.js';
 import type { Trade } from './monitor.js';
+import { logTrade } from './db.js';
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
 
@@ -557,6 +558,178 @@ export class TradeExecutor {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private logMakerFallbackEvent(
+    trade: Trade,
+    params: {
+      action: 'maker_fallback_placed' | 'maker_fallback_filled' | 'maker_fallback_cancelled';
+      reason: string;
+      orderId?: string;
+      fillPrice?: number;
+      fillSize?: number;
+      copyNotional?: number;
+    }
+  ): void {
+    logTrade({
+      ts: Date.now(),
+      market: trade.market,
+      marketSlug: trade.marketSlug,
+      tokenId: trade.tokenId,
+      side: trade.side,
+      sourcePrice: trade.price,
+      sourceSizeUsd: trade.size,
+      sourceAgeMs: trade.timestamp ? Math.max(0, Date.now() - trade.timestamp) : undefined,
+      action: params.action,
+      reason: params.reason,
+      orderId: params.orderId,
+      fillPrice: params.fillPrice,
+      fillSize: params.fillSize,
+      copyNotional: params.copyNotional,
+    });
+  }
+
+  private async tryMakerFallback(
+    originalTrade: Trade,
+    copyNotional: number,
+    orderbook: any
+  ): Promise<CopyExecutionResult | null> {
+    if (!config.trading.enableMakerFallback || originalTrade.side !== 'BUY' || (orderbook?.asks?.length || 0) > 0) {
+      return null;
+    }
+
+    console.log('⚠️  No asks available, trying maker fallback');
+
+    const bestBid = Number(orderbook?.bids?.[0]?.price);
+    if (!Number.isFinite(bestBid) || bestBid <= 0) {
+      console.log('   No best bid available; skipping maker fallback');
+      throw new Error('SKIP:no_bids_no_asks_orderbook');
+    }
+
+    console.log(`   Best bid: ${bestBid.toFixed(4)}`);
+
+    const rawPrice = bestBid * (1 + config.trading.makerFallbackPriceOffsetBps / 10000);
+    const cappedPrice = Math.min(rawPrice, config.trading.maxSourcePrice, 0.99);
+    const validatedPrice = await this.validatePrice(cappedPrice, originalTrade.tokenId);
+    const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+
+    console.log(`   Maker fallback price: ${validatedPrice.toFixed(4)}`);
+    console.log(`   Maker fallback shares: ${copyShares.toFixed(4)}`);
+
+    const response = await this.clobClient.createAndPostOrder(
+      {
+        tokenID: originalTrade.tokenId,
+        price: validatedPrice,
+        size: copyShares,
+        side: originalTrade.side as Side,
+        feeRateBps: 0,
+      },
+      orderOpts,
+      OrderType.GTC,
+      false,
+      true
+    );
+
+    if (!response.success) {
+      const errorMsg = response.errorMsg || response.error || 'Unknown error';
+      console.log(`❌ Maker fallback order failed: ${errorMsg}`);
+      throw new Error(`Order placement failed: ${errorMsg}`);
+    }
+
+    const orderId = response.orderID;
+    console.log(`   Maker fallback order placed: ${orderId}`);
+    this.logMakerFallbackEvent(originalTrade, {
+      action: 'maker_fallback_placed',
+      reason: 'asks_empty_fallback',
+      orderId,
+      fillPrice: validatedPrice,
+      fillSize: copyShares,
+      copyNotional,
+    });
+
+    const deadline = Date.now() + Math.max(1000, config.trading.makerFallbackTtlMs);
+    let lastMatched = 0;
+    let lastOrderStatus = '';
+    let resolvedPrice = validatedPrice;
+
+    while (Date.now() < deadline) {
+      await this.sleep(Math.min(1000, Math.max(100, deadline - Date.now())));
+      try {
+        const order = await this.clobClient.getOrder(orderId);
+        const matched = parseFloat(order?.size_matched || '0');
+        const originalSize = parseFloat(order?.original_size || copyShares.toString());
+        const status = String(order?.status || '').toUpperCase();
+        const price = parseFloat(order?.price || validatedPrice.toString());
+
+        lastMatched = Number.isFinite(matched) ? matched : lastMatched;
+        lastOrderStatus = status;
+        resolvedPrice = Number.isFinite(price) ? price : resolvedPrice;
+
+        if (lastMatched > 0 && (lastMatched >= originalSize - 0.0001 || ['FILLED', 'MATCHED', 'COMPLETED'].includes(status))) {
+          const filledNotional = lastMatched * resolvedPrice;
+          console.log('   Maker fallback filled');
+          this.logMakerFallbackEvent(originalTrade, {
+            action: 'maker_fallback_filled',
+            reason: 'maker_fallback_filled',
+            orderId,
+            fillPrice: resolvedPrice,
+            fillSize: lastMatched,
+            copyNotional: filledNotional,
+          });
+          return {
+            orderId,
+            copyNotional: filledNotional,
+            copyShares: lastMatched,
+            price: resolvedPrice,
+            side: originalTrade.side,
+            tokenId: originalTrade.tokenId,
+          };
+        }
+      } catch (error: any) {
+        console.log(`   Maker fallback poll failed: ${error?.message || 'Unknown error'}`);
+      }
+    }
+
+    console.log('   Maker fallback timeout, cancelling order');
+    try {
+      await this.clobClient.cancelOrder({ orderID: orderId });
+      console.log('   Maker fallback cancelled');
+    } catch (error: any) {
+      console.log(`   Maker fallback cancel failed: ${error?.message || 'Unknown error'}`);
+    }
+
+    this.logMakerFallbackEvent(originalTrade, {
+      action: 'maker_fallback_cancelled',
+      reason: lastMatched > 0 ? 'maker_fallback_timeout_partial_cancelled' : 'maker_fallback_timeout_cancelled',
+      orderId,
+      fillPrice: resolvedPrice,
+      fillSize: lastMatched > 0 ? lastMatched : undefined,
+      copyNotional: lastMatched > 0 ? lastMatched * resolvedPrice : undefined,
+    });
+
+    if (lastMatched > 0) {
+      const filledNotional = lastMatched * resolvedPrice;
+      console.log(`   Maker fallback partial fill retained: ${lastMatched.toFixed(4)} @ ${resolvedPrice.toFixed(4)}`);
+      this.logMakerFallbackEvent(originalTrade, {
+        action: 'maker_fallback_filled',
+        reason: 'maker_fallback_partial_fill',
+        orderId,
+        fillPrice: resolvedPrice,
+        fillSize: lastMatched,
+        copyNotional: filledNotional,
+      });
+      return {
+        orderId,
+        copyNotional: filledNotional,
+        copyShares: lastMatched,
+        price: resolvedPrice,
+        side: originalTrade.side,
+        tokenId: originalTrade.tokenId,
+      };
+    }
+
+    throw new Error('SKIP:maker_fallback_timeout_cancelled');
+  }
+
   private async executeLimitOrder(originalTrade: Trade, copyNotional: number): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
@@ -588,6 +761,10 @@ export class TradeExecutor {
     console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
 
     if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const makerFallbackResult = await this.tryMakerFallback(originalTrade, copyNotional, orderbook);
+      if (makerFallbackResult) {
+        return makerFallbackResult;
+      }
       const reason = originalTrade.side === 'BUY' ? 'no_asks_in_orderbook' : 'no_bids_in_orderbook';
       throw new Error(`SKIP:${reason}`);
     }
@@ -665,6 +842,10 @@ export class TradeExecutor {
     console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
 
     if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const makerFallbackResult = await this.tryMakerFallback(originalTrade, copyNotional, orderbook);
+      if (makerFallbackResult) {
+        return makerFallbackResult;
+      }
       const reason = originalTrade.side === 'BUY' ? 'no_asks_in_orderbook' : 'no_bids_in_orderbook';
       throw new Error(`SKIP:${reason}`);
     }

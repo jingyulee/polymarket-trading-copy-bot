@@ -370,7 +370,14 @@ class PolymarketCopyBot {
   private recordTradeLog(
     trade: Trade,
     params: {
-      action: 'skip' | 'dry_run' | 'copy_success' | 'copy_fail';
+      action:
+        | 'skip'
+        | 'dry_run'
+        | 'copy_success'
+        | 'copy_fail'
+        | 'maker_fallback_placed'
+        | 'maker_fallback_filled'
+        | 'maker_fallback_cancelled';
       reason: string;
       sourceAgeMs: number;
       orderId?: string;

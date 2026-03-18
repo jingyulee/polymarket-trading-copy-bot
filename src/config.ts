@@ -73,6 +73,9 @@ export const config = {
     maxPriceDeviation: parseNumber(process.env.MAX_PRICE_DEVIATION, 0.01),
     minLiquidity: parseNumber(process.env.MIN_LIQUIDITY, 5),
     maxEntryPriceGapBps: parseNumber(process.env.MAX_ENTRY_PRICE_GAP_BPS, 10),
+    enableMakerFallback: parseBoolean(process.env.ENABLE_MAKER_FALLBACK, false),
+    makerFallbackPriceOffsetBps: parseNumber(process.env.MAKER_FALLBACK_PRICE_OFFSET_BPS, 10),
+    makerFallbackTtlMs: parseNumber(process.env.MAKER_FALLBACK_TTL_MS, 15000),
   },
 
   risk: {
