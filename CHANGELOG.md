@@ -65,3 +65,13 @@
 - improve: clarify signer and funder initialization logs
 - experiment: add maker fallback limit buy when asks are empty
 - fix: use market fee rate for maker fallback orders
+- 整理：signer / funder / fundsCheck wallet 初始化角色與啟動 log 已澄清
+- 整理：支援固定 static CLOB API credentials，避免每次重建 API key 造成 account context 漂移
+- 整理：修正 CLOB balanceAllowance 的 allowances map 解析
+- 整理：proxy mode 下改用 funder 做資金與 allowance 檢查
+- 整理：missing orderbook 與 empty ask-bid orderbook 會改為 skip，而不是 copy fail
+- 整理：下單 feeRateBps 改用市場 metadata，不再寫死 0
+- 整理：新增 maker fallback 實驗功能，預設 `ENABLE_MAKER_FALLBACK=false`
+- 整理：新增 maker fallback market snapshot debug log，方便觀察 spread 與 depth
+- 驗證：已可成功送出 order、成功建立 maker fallback 掛單、成功 timeout 後 cancel
+- 結論：與 Polymarket 的交易技術鏈路已打通，剩餘工作主要是策略調整，不是技術串接問題
