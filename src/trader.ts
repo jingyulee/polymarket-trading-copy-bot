@@ -6,6 +6,7 @@ import type { Trade } from './monitor.js';
 import { logTrade } from './db.js';
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
+const GAMMA_MARKETS_URL = 'https://gamma-api.polymarket.com/markets';
 
 interface MarketMetadata {
   tickSize: number;
@@ -33,6 +34,13 @@ interface OrderbookCacheEntry {
 interface PrewarmTarget {
   tokenId: string;
   market: string;
+  symbol: string;
+}
+
+interface PrewarmResolutionResult {
+  targets: PrewarmTarget[];
+  foundSymbols: string[];
+  missingSymbols: string[];
 }
 
 export interface CopyExecutionResult {
@@ -507,15 +515,22 @@ export class TradeExecutor {
       return;
     }
 
-    const targets = await this.resolvePrewarmTokenIds();
-    if (targets.length === 0) {
+    const resolution = await this.resolvePrewarmTokenIds();
+    if (resolution.targets.length === 0) {
       console.log('ℹ️  Orderbook prewarm found no matching tokenIds');
+      if (resolution.missingSymbols.length > 0) {
+        console.log('[Orderbook Prewarm Missing Symbols]', resolution.missingSymbols);
+      }
       return;
     }
 
-    console.log(`🔥 Prewarming orderbooks for ${targets.length} token(s)`);
-    console.log('[Orderbook Prewarm Targets]', targets);
-    for (const target of targets) {
+    console.log(`🔥 Prewarming orderbooks for ${resolution.targets.length} token(s)`);
+    console.log('[Orderbook Prewarm Found Symbols]', resolution.foundSymbols);
+    if (resolution.missingSymbols.length > 0) {
+      console.log('[Orderbook Prewarm Missing Symbols]', resolution.missingSymbols);
+    }
+    console.log('[Orderbook Prewarm Targets]', resolution.targets);
+    for (const target of resolution.targets) {
       try {
         if (subscribeToMarket) {
           await subscribeToMarket(target.tokenId);
@@ -528,58 +543,78 @@ export class TradeExecutor {
     }
   }
 
-  private async resolvePrewarmTokenIds(): Promise<PrewarmTarget[]> {
+  private async resolvePrewarmTokenIds(): Promise<PrewarmResolutionResult> {
     try {
-      const { data } = await axios.get<any[]>(`${DATA_API_BASE}/markets`, {
+      const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
         params: {
-          closed: false,
-          limit: 200,
+          limit: 500,
         },
         timeout: 15_000,
       });
 
       const keywords = config.monitoring.prewarmSymbols;
       const targets = new Map<string, PrewarmTarget>();
+      const foundSymbols = new Set<string>();
+      const missingSymbols = new Set<string>(keywords);
+      const markets = Array.isArray(data) ? data : [];
 
-      for (const market of Array.isArray(data) ? data : []) {
-        const haystacks = [
-          market?.question,
-          market?.title,
-          market?.market,
-          market?.slug,
-          market?.market_slug,
-        ]
-          .filter(Boolean)
-          .map((value: any) => String(value).toLowerCase());
+      for (const symbol of keywords) {
+        for (const market of markets) {
+          const haystacks = [
+            market?.question,
+            market?.title,
+            market?.market,
+            market?.slug,
+            market?.market_slug,
+          ]
+            .filter(Boolean)
+            .map((value: any) => String(value).toLowerCase());
 
-        const matches = haystacks.some((text) => keywords.some((keyword) => text.includes(keyword)));
-        if (!matches) {
-          continue;
-        }
+          const matches = haystacks.some((text) => text.includes(symbol));
+          if (!matches) {
+            continue;
+          }
 
-        const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
-        for (const token of tokens) {
-          const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
-          if (tokenId) {
-            targets.set(tokenId, {
-              tokenId,
-              market: String(
-                market?.question ||
-                market?.title ||
-                market?.market ||
-                market?.slug ||
-                market?.market_slug ||
-                'unknown-market'
-              ),
-            });
+          const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
+          let matchedToken = false;
+          for (const token of tokens) {
+            const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
+            if (tokenId) {
+              matchedToken = true;
+              targets.set(tokenId, {
+                tokenId,
+                symbol,
+                market: String(
+                  market?.question ||
+                  market?.title ||
+                  market?.market ||
+                  market?.slug ||
+                  market?.market_slug ||
+                  'unknown-market'
+                ),
+              });
+            }
+          }
+
+          if (matchedToken) {
+            foundSymbols.add(symbol);
+            missingSymbols.delete(symbol);
           }
         }
       }
 
-      return Array.from(targets.values());
+      return {
+        targets: Array.from(targets.values()),
+        foundSymbols: Array.from(foundSymbols),
+        missingSymbols: Array.from(missingSymbols),
+      };
     } catch (error: any) {
       console.log(`⚠️  Could not resolve prewarm tokenIds: ${error?.message || 'Unknown error'}`);
-      return [];
+      return {
+        targets: [],
+        foundSymbols: [],
+        missingSymbols: [...config.monitoring.prewarmSymbols],
+      };
     }
   }
 
