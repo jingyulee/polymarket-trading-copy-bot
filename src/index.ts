@@ -189,16 +189,24 @@ class PolymarketCopyBot {
     }
 
     const orderbook = await this.executor.getOrderbook(trade.tokenId);
+    const bestBid = Number(orderbook?.bids?.[0]?.price);
     const bestAsk = Number(orderbook?.asks?.[0]?.price);
     const bestAskSize = Number(orderbook?.asks?.[0]?.size);
+    const bidsDepth = orderbook?.bids?.length || 0;
+    const asksDepth = orderbook?.asks?.length || 0;
+    const spread = Number.isFinite(bestBid) && Number.isFinite(bestAsk) ? bestAsk - bestBid : undefined;
     const bestAskLiquidityUsd = Number.isFinite(bestAsk) && Number.isFinite(bestAskSize)
       ? bestAsk * bestAskSize
       : undefined;
 
     const filterResult = applyFilters(trade, {
       now: Date.now(),
+      bestBid: Number.isFinite(bestBid) ? bestBid : undefined,
       bestAsk: Number.isFinite(bestAsk) ? bestAsk : undefined,
       bestAskLiquidityUsd,
+      spread,
+      bidsDepth,
+      asksDepth,
       marketLocks: this.marketLocks,
     });
 
@@ -209,6 +217,9 @@ class PolymarketCopyBot {
         sourceAgeMs,
       });
       console.log(`⚠️  Filter skipped trade: ${filterResult.reason}`);
+      if (filterResult.details) {
+        console.log('   Filter market snapshot:', filterResult.details);
+      }
       this.printStats();
       return;
     }

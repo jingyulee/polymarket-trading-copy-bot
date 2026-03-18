@@ -76,6 +76,10 @@ export const config = {
     enableMakerFallback: parseBoolean(process.env.ENABLE_MAKER_FALLBACK, false),
     makerFallbackPriceOffsetBps: parseNumber(process.env.MAKER_FALLBACK_PRICE_OFFSET_BPS, 10),
     makerFallbackTtlMs: parseNumber(process.env.MAKER_FALLBACK_TTL_MS, 15000),
+    minBestBidForMakerFallback: parseNumber(process.env.MIN_BEST_BID_FOR_MAKER_FALLBACK, 0.10),
+    maxSpreadForEntry: parseNumber(process.env.MAX_SPREAD_FOR_ENTRY, 0.05),
+    minAsksDepth: parseNumber(process.env.MIN_ASKS_DEPTH, 1),
+    onlyHighLiquiditySymbols: parseBoolean(process.env.ONLY_HIGH_LIQUIDITY_SYMBOLS, true),
   },
 
   risk: {

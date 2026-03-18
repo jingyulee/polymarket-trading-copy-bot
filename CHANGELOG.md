@@ -75,3 +75,6 @@
 - 整理：新增 maker fallback market snapshot debug log，方便觀察 spread 與 depth
 - 驗證：已可成功送出 order、成功建立 maker fallback 掛單、成功 timeout 後 cancel
 - 結論：與 Polymarket 的交易技術鏈路已打通，剩餘工作主要是策略調整，不是技術串接問題
+- feat: add execution fill strategy filters
+- feat: add high-liquidity market whitelist for BUY execution
+- feat: add maker fallback bid / spread / depth guards

@@ -19,18 +19,36 @@ export interface FilterTrade {
 export interface FilterResult {
   pass: boolean;
   reason: string;
+  details?: {
+    bestBid?: number;
+    bestAsk?: number;
+    spread?: number;
+    bidsDepth?: number;
+    asksDepth?: number;
+  };
 }
 
 export interface FilterContext {
   now?: number;
+  bestBid?: number | null;
   bestAsk?: number | null;
   bestAskLiquidityUsd?: number | null;
+  spread?: number | null;
+  bidsDepth?: number | null;
+  asksDepth?: number | null;
   marketLocks?: Set<string>;
 }
+
+const HIGH_LIQUIDITY_KEYWORDS = ['btc', 'bitcoin', 'eth', 'ethereum', 'sol', 'solana'];
 
 function textContainsCrypto(value: string): boolean {
   const normalized = value.toLowerCase();
   return config.trading.cryptoKeywords.some((keyword) => normalized.includes(keyword));
+}
+
+function textContainsHighLiquiditySymbol(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return HIGH_LIQUIDITY_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
 export function getMarketLockKey(trade: FilterTrade): string {
@@ -49,6 +67,18 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
   const sourcePrice = Number(trade.price);
   const sourceSizeUsd = Number(trade.size);
   const sourceAgeMs = Math.max(0, now - Number(trade.timestamp || now));
+  const bestBid = Number(context.bestBid);
+  const bestAsk = Number(context.bestAsk);
+  const spread = Number(context.spread);
+  const bidsDepth = Number(context.bidsDepth);
+  const asksDepth = Number(context.asksDepth);
+  const details = {
+    bestBid: Number.isFinite(bestBid) ? bestBid : undefined,
+    bestAsk: Number.isFinite(bestAsk) ? bestAsk : undefined,
+    spread: Number.isFinite(spread) ? spread : undefined,
+    bidsDepth: Number.isFinite(bidsDepth) ? bidsDepth : undefined,
+    asksDepth: Number.isFinite(asksDepth) ? asksDepth : undefined,
+  };
 
   if (config.trading.copyOnlyBuy && trade.side !== 'BUY') {
     return { pass: false, reason: 'skip_sell_trade' };
@@ -83,6 +113,13 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
     if (!isCryptoMarket) {
       return { pass: false, reason: 'non_crypto_market' };
     }
+
+    if (config.trading.onlyHighLiquiditySymbols) {
+      const isHighLiquiditySymbol = marketTexts.some(textContainsHighLiquiditySymbol);
+      if (!isHighLiquiditySymbol) {
+        return { pass: false, reason: 'not_high_liquidity_symbol', details };
+      }
+    }
   }
 
   const marketLockKey = getMarketLockKey(trade);
@@ -106,6 +143,22 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
       const gapBps = ((bestAsk - sourcePrice) / sourcePrice) * 10000;
       if (gapBps > config.trading.maxEntryPriceGapBps) {
         return { pass: false, reason: 'slippage_gap_too_high' };
+      }
+    }
+  }
+
+  if (trade.side === 'BUY') {
+    if (Number.isFinite(asksDepth) && asksDepth === 0 && !config.trading.enableMakerFallback) {
+      return { pass: false, reason: 'no_asks_in_orderbook', details };
+    }
+
+    if (Number.isFinite(asksDepth) && asksDepth > 0 && asksDepth < config.trading.minAsksDepth) {
+      return { pass: false, reason: 'asks_depth_too_low', details };
+    }
+
+    if (Number.isFinite(spread) && Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > 0 && bestAsk > 0) {
+      if (spread > config.trading.maxSpreadForEntry) {
+        return { pass: false, reason: 'spread_too_wide', details };
       }
     }
   }
