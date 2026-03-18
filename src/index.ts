@@ -106,11 +106,17 @@ class PolymarketCopyBot {
             await this.wsMonitor.subscribeToCondition(marketId);
           }
         }
+
+        await this.executor.prewarmOrderbooks(
+          channel === 'market' ? this.wsMonitor.subscribeToMarket.bind(this.wsMonitor) : undefined
+        );
       } catch (error) {
         console.error('⚠️  WebSocket initialization failed, falling back to REST API only');
         console.error('   Error:', error);
         this.wsMonitor = undefined;
       }
+    } else {
+      await this.executor.prewarmOrderbooks();
     }
 
     await sendTelegramDeduped(

@@ -24,6 +24,12 @@ interface RetryConfig {
   backoffMultiplier: number;
 }
 
+interface OrderbookCacheEntry {
+  bids: any[];
+  asks: any[];
+  ts: number;
+}
+
 export interface CopyExecutionResult {
   orderId: string;
   copyNotional: number;
@@ -39,6 +45,7 @@ export class TradeExecutor {
   private clobClient: ClobClient;
   private apiCreds?: { apiKey: string; secret: string; passphrase: string };
   private marketCache: Map<string, MarketMetadata> = new Map();
+  private orderbookCache = new Map<string, OrderbookCacheEntry>();
   private warnedMissingOutcomeMappings = new Set<string>();
   private readonly CACHE_TTL = 3600000;
   private readonly RETRY_CONFIG: RetryConfig = {
@@ -381,12 +388,160 @@ export class TradeExecutor {
     return metadata.tickSize;
   }
 
-  async getOrderbook(tokenId: string): Promise<any | null> {
+  private normalizeOrderbook(orderbook: any): OrderbookCacheEntry {
+    return {
+      bids: Array.isArray(orderbook?.bids) ? orderbook.bids : [],
+      asks: Array.isArray(orderbook?.asks) ? orderbook.asks : [],
+      ts: Date.now(),
+    };
+  }
+
+  private setOrderbookCache(tokenId: string, orderbook: any): OrderbookCacheEntry {
+    const normalized = this.normalizeOrderbook(orderbook);
+    this.orderbookCache.set(tokenId, normalized);
+    return normalized;
+  }
+
+  private getFreshOrderbookCache(tokenId: string): OrderbookCacheEntry | undefined {
+    const cached = this.orderbookCache.get(tokenId);
+    if (!cached) return undefined;
+    if (Date.now() - cached.ts >= config.monitoring.orderbookCacheTtlMs) {
+      return undefined;
+    }
+    return cached;
+  }
+
+  private async fetchOrderbookFromApi(tokenId: string): Promise<OrderbookCacheEntry | null> {
     try {
-      return await this.clobClient.getOrderBook(tokenId);
+      const orderbook = await this.clobClient.getOrderBook(tokenId);
+      return this.setOrderbookCache(tokenId, orderbook);
     } catch (error: any) {
       console.log(`⚠️  Could not fetch orderbook for ${tokenId}: ${error?.message || 'Unknown error'}`);
       return null;
+    }
+  }
+
+  async getOrderbook(tokenId: string): Promise<any | null> {
+    const cached = this.getFreshOrderbookCache(tokenId);
+    if (cached) {
+      console.log('[Orderbook Cache]', {
+        tokenId,
+        source: 'cache',
+        ageMs: Date.now() - cached.ts,
+      });
+      return { bids: cached.bids, asks: cached.asks };
+    }
+
+    const staleCached = this.orderbookCache.get(tokenId);
+    console.log('[Orderbook Cache]', {
+      tokenId,
+      source: 'fetch',
+      ageMs: staleCached ? Date.now() - staleCached.ts : null,
+    });
+
+    const fetched = await this.fetchOrderbookFromApi(tokenId);
+    if (fetched) {
+      return { bids: fetched.bids, asks: fetched.asks };
+    }
+
+    if (staleCached) {
+      return { bids: staleCached.bids, asks: staleCached.asks };
+    }
+
+    return null;
+  }
+
+  private async getOrderbookForExecution(tokenId: string): Promise<any> {
+    const cached = this.getFreshOrderbookCache(tokenId);
+    if (cached) {
+      console.log('[Orderbook Cache]', {
+        tokenId,
+        source: 'cache',
+        ageMs: Date.now() - cached.ts,
+      });
+      return { bids: cached.bids, asks: cached.asks };
+    }
+
+    const staleCached = this.orderbookCache.get(tokenId);
+    console.log('[Orderbook Cache]', {
+      tokenId,
+      source: 'fetch',
+      ageMs: staleCached ? Date.now() - staleCached.ts : null,
+    });
+
+    const orderbook = await this.clobClient.getOrderBook(tokenId);
+    const normalized = this.setOrderbookCache(tokenId, orderbook);
+    return { bids: normalized.bids, asks: normalized.asks };
+  }
+
+  async prewarmOrderbooks(
+    subscribeToMarket?: (tokenId: string) => Promise<void>
+  ): Promise<void> {
+    if (!config.monitoring.enableOrderbookPrewarm || config.monitoring.prewarmSymbols.length === 0) {
+      return;
+    }
+
+    const tokenIds = await this.resolvePrewarmTokenIds();
+    if (tokenIds.length === 0) {
+      console.log('ℹ️  Orderbook prewarm found no matching tokenIds');
+      return;
+    }
+
+    console.log(`🔥 Prewarming orderbooks for ${tokenIds.length} token(s)`);
+    for (const tokenId of tokenIds) {
+      try {
+        if (subscribeToMarket) {
+          await subscribeToMarket(tokenId);
+        }
+        await this.fetchOrderbookFromApi(tokenId);
+      } catch (error: any) {
+        console.log(`⚠️  Orderbook prewarm failed for ${tokenId}: ${error?.message || 'Unknown error'}`);
+      }
+    }
+  }
+
+  private async resolvePrewarmTokenIds(): Promise<string[]> {
+    try {
+      const { data } = await axios.get<any[]>(`${DATA_API_BASE}/markets`, {
+        params: {
+          closed: false,
+          limit: 200,
+        },
+        timeout: 15_000,
+      });
+
+      const keywords = config.monitoring.prewarmSymbols;
+      const tokenIds = new Set<string>();
+
+      for (const market of Array.isArray(data) ? data : []) {
+        const haystacks = [
+          market?.question,
+          market?.title,
+          market?.market,
+          market?.slug,
+          market?.market_slug,
+        ]
+          .filter(Boolean)
+          .map((value: any) => String(value).toLowerCase());
+
+        const matches = haystacks.some((text) => keywords.some((keyword) => text.includes(keyword)));
+        if (!matches) {
+          continue;
+        }
+
+        const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
+        for (const token of tokens) {
+          const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
+          if (tokenId) {
+            tokenIds.add(tokenId);
+          }
+        }
+      }
+
+      return Array.from(tokenIds);
+    } catch (error: any) {
+      console.log(`⚠️  Could not resolve prewarm tokenIds: ${error?.message || 'Unknown error'}`);
+      return [];
     }
   }
 
@@ -768,7 +923,7 @@ export class TradeExecutor {
 
     let orderbook;
     try {
-      orderbook = await this.clobClient.getOrderBook(originalTrade.tokenId);
+      orderbook = await this.getOrderbookForExecution(originalTrade.tokenId);
     } catch (error: any) {
       if (error?.response?.status === 404 && error?.response?.data?.error?.includes('No orderbook exists for the requested token id')) {
         throw new Error(`SKIP:no_orderbook_exists`);
@@ -851,7 +1006,7 @@ export class TradeExecutor {
 
     let orderbook;
     try {
-      orderbook = await this.clobClient.getOrderBook(originalTrade.tokenId);
+      orderbook = await this.getOrderbookForExecution(originalTrade.tokenId);
     } catch (error: any) {
       if (error?.response?.status === 404 && error?.response?.data?.error?.includes('No orderbook exists for the requested token id')) {
         throw new Error(`SKIP:no_orderbook_exists`);
