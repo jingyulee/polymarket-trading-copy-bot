@@ -30,6 +30,11 @@ interface OrderbookCacheEntry {
   ts: number;
 }
 
+interface PrewarmTarget {
+  tokenId: string;
+  market: string;
+}
+
 export interface CopyExecutionResult {
   orderId: string;
   copyNotional: number;
@@ -396,9 +401,16 @@ export class TradeExecutor {
     };
   }
 
-  private setOrderbookCache(tokenId: string, orderbook: any): OrderbookCacheEntry {
+  private setOrderbookCache(tokenId: string, orderbook: any, source: 'prewarm' | 'fetch' | 'execution_fetch'): OrderbookCacheEntry {
     const normalized = this.normalizeOrderbook(orderbook);
     this.orderbookCache.set(tokenId, normalized);
+    console.log('[Orderbook Cache Update]', {
+      tokenId,
+      source,
+      bidsDepth: normalized.bids.length,
+      asksDepth: normalized.asks.length,
+      ts: normalized.ts,
+    });
     return normalized;
   }
 
@@ -414,7 +426,7 @@ export class TradeExecutor {
   private async fetchOrderbookFromApi(tokenId: string): Promise<OrderbookCacheEntry | null> {
     try {
       const orderbook = await this.clobClient.getOrderBook(tokenId);
-      return this.setOrderbookCache(tokenId, orderbook);
+      return this.setOrderbookCache(tokenId, orderbook, 'fetch');
     } catch (error: any) {
       console.log(`⚠️  Could not fetch orderbook for ${tokenId}: ${error?.message || 'Unknown error'}`);
       return null;
@@ -423,20 +435,27 @@ export class TradeExecutor {
 
   async getOrderbook(tokenId: string): Promise<any | null> {
     const cached = this.getFreshOrderbookCache(tokenId);
+    const staleCached = this.orderbookCache.get(tokenId);
+    const ageMs = staleCached ? Date.now() - staleCached.ts : null;
+    const cacheHit = Boolean(cached);
+    const cacheExpired = Boolean(staleCached && !cached);
     if (cached) {
       console.log('[Orderbook Cache]', {
         tokenId,
         source: 'cache',
-        ageMs: Date.now() - cached.ts,
+        ageMs,
+        cacheHit,
+        cacheExpired,
       });
       return { bids: cached.bids, asks: cached.asks };
     }
 
-    const staleCached = this.orderbookCache.get(tokenId);
     console.log('[Orderbook Cache]', {
       tokenId,
       source: 'fetch',
-      ageMs: staleCached ? Date.now() - staleCached.ts : null,
+      ageMs,
+      cacheHit,
+      cacheExpired,
     });
 
     const fetched = await this.fetchOrderbookFromApi(tokenId);
@@ -453,24 +472,31 @@ export class TradeExecutor {
 
   private async getOrderbookForExecution(tokenId: string): Promise<any> {
     const cached = this.getFreshOrderbookCache(tokenId);
+    const staleCached = this.orderbookCache.get(tokenId);
+    const ageMs = staleCached ? Date.now() - staleCached.ts : null;
+    const cacheHit = Boolean(cached);
+    const cacheExpired = Boolean(staleCached && !cached);
     if (cached) {
       console.log('[Orderbook Cache]', {
         tokenId,
         source: 'cache',
-        ageMs: Date.now() - cached.ts,
+        ageMs,
+        cacheHit,
+        cacheExpired,
       });
       return { bids: cached.bids, asks: cached.asks };
     }
 
-    const staleCached = this.orderbookCache.get(tokenId);
     console.log('[Orderbook Cache]', {
       tokenId,
       source: 'fetch',
-      ageMs: staleCached ? Date.now() - staleCached.ts : null,
+      ageMs,
+      cacheHit,
+      cacheExpired,
     });
 
     const orderbook = await this.clobClient.getOrderBook(tokenId);
-    const normalized = this.setOrderbookCache(tokenId, orderbook);
+    const normalized = this.setOrderbookCache(tokenId, orderbook, 'execution_fetch');
     return { bids: normalized.bids, asks: normalized.asks };
   }
 
@@ -481,26 +507,28 @@ export class TradeExecutor {
       return;
     }
 
-    const tokenIds = await this.resolvePrewarmTokenIds();
-    if (tokenIds.length === 0) {
+    const targets = await this.resolvePrewarmTokenIds();
+    if (targets.length === 0) {
       console.log('ℹ️  Orderbook prewarm found no matching tokenIds');
       return;
     }
 
-    console.log(`🔥 Prewarming orderbooks for ${tokenIds.length} token(s)`);
-    for (const tokenId of tokenIds) {
+    console.log(`🔥 Prewarming orderbooks for ${targets.length} token(s)`);
+    console.log('[Orderbook Prewarm Targets]', targets);
+    for (const target of targets) {
       try {
         if (subscribeToMarket) {
-          await subscribeToMarket(tokenId);
+          await subscribeToMarket(target.tokenId);
         }
-        await this.fetchOrderbookFromApi(tokenId);
+        const orderbook = await this.clobClient.getOrderBook(target.tokenId);
+        this.setOrderbookCache(target.tokenId, orderbook, 'prewarm');
       } catch (error: any) {
-        console.log(`⚠️  Orderbook prewarm failed for ${tokenId}: ${error?.message || 'Unknown error'}`);
+        console.log(`⚠️  Orderbook prewarm failed for ${target.tokenId}: ${error?.message || 'Unknown error'}`);
       }
     }
   }
 
-  private async resolvePrewarmTokenIds(): Promise<string[]> {
+  private async resolvePrewarmTokenIds(): Promise<PrewarmTarget[]> {
     try {
       const { data } = await axios.get<any[]>(`${DATA_API_BASE}/markets`, {
         params: {
@@ -511,7 +539,7 @@ export class TradeExecutor {
       });
 
       const keywords = config.monitoring.prewarmSymbols;
-      const tokenIds = new Set<string>();
+      const targets = new Map<string, PrewarmTarget>();
 
       for (const market of Array.isArray(data) ? data : []) {
         const haystacks = [
@@ -533,12 +561,22 @@ export class TradeExecutor {
         for (const token of tokens) {
           const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
           if (tokenId) {
-            tokenIds.add(tokenId);
+            targets.set(tokenId, {
+              tokenId,
+              market: String(
+                market?.question ||
+                market?.title ||
+                market?.market ||
+                market?.slug ||
+                market?.market_slug ||
+                'unknown-market'
+              ),
+            });
           }
         }
       }
 
-      return Array.from(tokenIds);
+      return Array.from(targets.values());
     } catch (error: any) {
       console.log(`⚠️  Could not resolve prewarm tokenIds: ${error?.message || 'Unknown error'}`);
       return [];

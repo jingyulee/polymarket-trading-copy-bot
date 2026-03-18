@@ -78,3 +78,4 @@
 - feat: add execution fill strategy filters
 - feat: add high-liquidity market whitelist for BUY execution
 - feat: add maker fallback bid / spread / depth guards
+- chore: improve orderbook cache diagnostics and null-safe market snapshot
