@@ -611,9 +611,11 @@ export class TradeExecutor {
     const validatedPrice = await this.validatePrice(cappedPrice, originalTrade.tokenId);
     const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
 
     console.log(`   Maker fallback price: ${validatedPrice.toFixed(4)}`);
     console.log(`   Maker fallback shares: ${copyShares.toFixed(4)}`);
+    console.log(`   feeRateBps: ${feeRateBps}`);
 
     const response = await this.clobClient.createAndPostOrder(
       {
@@ -621,7 +623,7 @@ export class TradeExecutor {
         price: validatedPrice,
         size: copyShares,
         side: originalTrade.side as Side,
-        feeRateBps: 0,
+        feeRateBps,
       },
       orderOpts,
       OrderType.GTC,
@@ -745,6 +747,7 @@ export class TradeExecutor {
     orderbook = orderbook || { bids: [], asks: [] };
 
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
 
     console.log(`[DEBUG] Execution details:`);
     console.log(`   tokenId: ${originalTrade.tokenId}`);
@@ -777,6 +780,7 @@ export class TradeExecutor {
 
     console.log(`   Limit price: ${validatedPrice.toFixed(4)}`);
     console.log(`   Copy shares: ${copyShares}`);
+    console.log(`   feeRateBps: ${feeRateBps}`);
 
     const response = await this.clobClient.createAndPostOrder(
       {
@@ -784,7 +788,7 @@ export class TradeExecutor {
         price: validatedPrice,
         size: copyShares,
         side: originalTrade.side as Side,
-        feeRateBps: 0,
+        feeRateBps,
       },
       orderOpts,
       OrderType.GTC
@@ -826,6 +830,7 @@ export class TradeExecutor {
     orderbook = orderbook || { bids: [], asks: [] };
 
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
 
     console.log(`[DEBUG] Execution details:`);
     console.log(`   tokenId: ${originalTrade.tokenId}`);
@@ -857,6 +862,7 @@ export class TradeExecutor {
     const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
     console.log(`   Market price: ${validatedPrice.toFixed(4)}`);
     console.log(`   Copy shares: ${copyShares}`);
+    console.log(`   feeRateBps: ${feeRateBps}`);
 
     const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
     const response = await this.clobClient.createAndPostMarketOrder(
@@ -865,7 +871,7 @@ export class TradeExecutor {
         amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
         price: validatedPrice,
         side: originalTrade.side as Side,
-        feeRateBps: 0,
+        feeRateBps,
         orderType: orderTypeEnum,
       },
       orderOpts,
@@ -979,6 +985,11 @@ export class TradeExecutor {
     } catch (error) {
       console.error('Error cancelling orders:', error);
     }
+  }
+
+  private async getFeeRateBps(tokenId: string): Promise<number> {
+    const metadata = await this.getMarketMetadata(tokenId);
+    return metadata.feeRateBps;
   }
 
   private async getOrderOptions(tokenId: string): Promise<{ tickSize: any; negRisk: boolean }> {
