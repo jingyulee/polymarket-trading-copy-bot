@@ -41,6 +41,14 @@ interface PrewarmResolutionResult {
   targets: PrewarmTarget[];
   foundSymbols: string[];
   missingSymbols: string[];
+  loadedMarketsCount: number;
+  matchedMarketsCount: number;
+  resolvedTokenIdsCount: number;
+}
+
+interface ActiveMarketsCacheEntry {
+  markets: any[];
+  timestamp: number;
 }
 
 export interface CopyExecutionResult {
@@ -59,8 +67,10 @@ export class TradeExecutor {
   private apiCreds?: { apiKey: string; secret: string; passphrase: string };
   private marketCache: Map<string, MarketMetadata> = new Map();
   private orderbookCache = new Map<string, OrderbookCacheEntry>();
+  private activeMarketsCache?: ActiveMarketsCacheEntry;
   private warnedMissingOutcomeMappings = new Set<string>();
   private readonly CACHE_TTL = 3600000;
+  private readonly ACTIVE_MARKETS_CACHE_TTL = 60_000;
   private readonly RETRY_CONFIG: RetryConfig = {
     maxAttempts: 3,
     initialDelay: 1000,
@@ -516,6 +526,11 @@ export class TradeExecutor {
     }
 
     const resolution = await this.resolvePrewarmTokenIds();
+    console.log('[Orderbook Prewarm Markets]', {
+      loadedMarketsCount: resolution.loadedMarketsCount,
+      matchedMarketsCount: resolution.matchedMarketsCount,
+      resolvedTokenIdsCount: resolution.resolvedTokenIdsCount,
+    });
     if (resolution.targets.length === 0) {
       console.log('ℹ️  Orderbook prewarm found no matching tokenIds');
       if (resolution.missingSymbols.length > 0) {
@@ -530,10 +545,12 @@ export class TradeExecutor {
       console.log('[Orderbook Prewarm Missing Symbols]', resolution.missingSymbols);
     }
     console.log('[Orderbook Prewarm Targets]', resolution.targets);
+    const subscribedTokenIds: string[] = [];
     for (const target of resolution.targets) {
       try {
         if (subscribeToMarket) {
           await subscribeToMarket(target.tokenId);
+          subscribedTokenIds.push(target.tokenId);
         }
         const orderbook = await this.clobClient.getOrderBook(target.tokenId);
         this.setOrderbookCache(target.tokenId, orderbook, 'prewarm');
@@ -541,6 +558,7 @@ export class TradeExecutor {
         console.log(`⚠️  Orderbook prewarm failed for ${target.tokenId}: ${error?.message || 'Unknown error'}`);
       }
     }
+    console.log('[Orderbook Prewarm Subscribed TokenIds]', subscribedTokenIds);
   }
 
   private async resolvePrewarmTokenIds(): Promise<PrewarmResolutionResult> {
@@ -549,49 +567,21 @@ export class TradeExecutor {
       const targets = new Map<string, PrewarmTarget>();
       const foundSymbols = new Set<string>();
       const missingSymbols = new Set<string>(keywords);
-      const markets: any[] = [];
-      const pageSize = 200;
-
-      for (let offset = 0; offset < 1000; offset += pageSize) {
-        const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
-          params: {
-            limit: pageSize,
-            offset,
-          },
-          timeout: 15_000,
-        });
-        const batch = Array.isArray(data) ? data : [];
-        if (batch.length === 0) {
-          break;
-        }
-        markets.push(...batch);
-        if (batch.length < pageSize) {
-          break;
-        }
-      }
+      const matchedMarkets = new Set<string>();
+      const markets = await this.loadActiveOpenMarkets();
 
       for (const symbol of keywords) {
         for (const market of markets) {
-          const haystacks = [
-            market?.question,
-            market?.title,
-            market?.market,
-            market?.slug,
-            market?.market_slug,
-            market?.ticker,
-          ]
-            .filter(Boolean)
-            .map((value: any) => String(value).toLowerCase());
+          const haystacks = this.getPrewarmMarketHaystacks(market);
 
           const matches = haystacks.some((text) => text.includes(symbol));
           if (!matches) {
             continue;
           }
 
-          const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
+          const tokenIds = this.extractTokenIdsFromMarket(market);
           let matchedToken = false;
-          for (const token of tokens) {
-            const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '');
+          for (const tokenId of tokenIds) {
             if (tokenId) {
               matchedToken = true;
               targets.set(tokenId, {
@@ -610,6 +600,7 @@ export class TradeExecutor {
           }
 
           if (matchedToken) {
+            matchedMarkets.add(this.getMarketCacheKey(market));
             foundSymbols.add(symbol);
             missingSymbols.delete(symbol);
           }
@@ -620,6 +611,9 @@ export class TradeExecutor {
         targets: Array.from(targets.values()),
         foundSymbols: Array.from(foundSymbols),
         missingSymbols: Array.from(missingSymbols),
+        loadedMarketsCount: markets.length,
+        matchedMarketsCount: matchedMarkets.size,
+        resolvedTokenIdsCount: targets.size,
       };
     } catch (error: any) {
       console.log(`⚠️  Could not resolve prewarm tokenIds: ${error?.message || 'Unknown error'}`);
@@ -627,8 +621,128 @@ export class TradeExecutor {
         targets: [],
         foundSymbols: [],
         missingSymbols: [...config.monitoring.prewarmSymbols],
+        loadedMarketsCount: 0,
+        matchedMarketsCount: 0,
+        resolvedTokenIdsCount: 0,
       };
     }
+  }
+
+  private async loadActiveOpenMarkets(): Promise<any[]> {
+    const now = Date.now();
+    if (this.activeMarketsCache && (now - this.activeMarketsCache.timestamp) < this.ACTIVE_MARKETS_CACHE_TTL) {
+      return this.activeMarketsCache.markets;
+    }
+
+    const markets: any[] = [];
+    const pageSize = 200;
+
+    for (let offset = 0; offset < 2000; offset += pageSize) {
+      try {
+        const { data } = await axios.get<any[]>(`${DATA_API_BASE}/markets`, {
+          params: {
+            active: true,
+            closed: false,
+            archived: false,
+            limit: pageSize,
+            offset,
+          },
+          timeout: 15_000,
+        });
+
+        const batch = Array.isArray(data) ? data : [];
+        if (batch.length === 0) {
+          break;
+        }
+
+        markets.push(...batch);
+        if (batch.length < pageSize) {
+          break;
+        }
+      } catch (error: any) {
+        console.log(`⚠️  Active/open market fetch failed at offset=${offset}: ${error?.message || 'Unknown error'}`);
+        break;
+      }
+    }
+
+    this.activeMarketsCache = {
+      markets,
+      timestamp: now,
+    };
+
+    return markets;
+  }
+
+  private getPrewarmMarketHaystacks(market: any): string[] {
+    return [
+      market?.question,
+      market?.title,
+      market?.market,
+      market?.slug,
+      market?.marketSlug,
+      market?.market_slug,
+      market?.ticker,
+    ]
+      .filter(Boolean)
+      .map((value: any) => String(value).toLowerCase());
+  }
+
+  private getMarketCacheKey(market: any): string {
+    return String(
+      market?.conditionId ||
+      market?.condition_id ||
+      market?.slug ||
+      market?.marketSlug ||
+      market?.market_slug ||
+      market?.question ||
+      market?.title ||
+      market?.market ||
+      JSON.stringify(market)
+    );
+  }
+
+  private extractTokenIdsFromMarket(market: any): string[] {
+    const tokenIds = new Set<string>();
+    const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
+
+    for (const token of tokens) {
+      const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '').trim();
+      if (tokenId) {
+        tokenIds.add(tokenId);
+      }
+    }
+
+    for (const fallbackField of [
+      market?.clobTokenIds,
+      market?.clob_token_ids,
+      market?.tokenIds,
+      market?.token_ids,
+    ]) {
+      for (const tokenId of this.parseTokenIdList(fallbackField)) {
+        tokenIds.add(tokenId);
+      }
+    }
+
+    return Array.from(tokenIds);
+  }
+
+  private parseTokenIdList(value: any): string[] {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item).trim()).filter(Boolean);
+    }
+
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => String(item).trim()).filter(Boolean);
+        }
+      } catch {
+        return value.split(',').map((item) => item.trim()).filter(Boolean);
+      }
+    }
+
+    return [];
   }
 
   async getBestAsk(tokenId: string): Promise<number | null> {
