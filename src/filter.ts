@@ -6,6 +6,8 @@ export interface FilterTrade {
   marketSlug?: string;
   question?: string;
   title?: string;
+  category?: string;
+  tags?: string[] | string;
   tokenId?: string;
   conditionId?: string;
   sourceTrader?: string;
@@ -49,6 +51,47 @@ function textContainsCrypto(value: string): boolean {
 function textContainsHighLiquiditySymbol(value: string): boolean {
   const normalized = value.toLowerCase();
   return HIGH_LIQUIDITY_KEYWORDS.some((keyword) => normalized.includes(keyword));
+}
+
+function findMatchingKeyword(value: string | undefined, keywords: string[]): string | null {
+  const normalized = String(value || '').toLowerCase();
+  if (!normalized) return null;
+  return keywords.find((keyword) => normalized.includes(keyword.toLowerCase())) || null;
+}
+
+function getCryptoMarketMatch(trade: FilterTrade): {
+  matchedKeyword: string | null;
+  matchedField: 'slug' | 'title' | 'category' | 'tags' | null;
+} {
+  const keywords = config.trading.cryptoKeywords.map((keyword) => keyword.toLowerCase());
+
+  const slugMatch = findMatchingKeyword(trade.marketSlug, keywords);
+  if (slugMatch) {
+    return { matchedKeyword: slugMatch, matchedField: 'slug' };
+  }
+
+  const titleCandidates = [trade.title, trade.market, trade.question];
+  for (const candidate of titleCandidates) {
+    const titleMatch = findMatchingKeyword(candidate, keywords);
+    if (titleMatch) {
+      return { matchedKeyword: titleMatch, matchedField: 'title' };
+    }
+  }
+
+  const categoryMatch = findMatchingKeyword(trade.category, keywords);
+  if (categoryMatch) {
+    return { matchedKeyword: categoryMatch, matchedField: 'category' };
+  }
+
+  const tags = Array.isArray(trade.tags) ? trade.tags : typeof trade.tags === 'string' ? trade.tags.split(',') : [];
+  for (const tag of tags) {
+    const tagMatch = findMatchingKeyword(tag, keywords);
+    if (tagMatch) {
+      return { matchedKeyword: tagMatch, matchedField: 'tags' };
+    }
+  }
+
+  return { matchedKeyword: null, matchedField: null };
 }
 
 export function getMarketLockKey(trade: FilterTrade): string {
@@ -168,6 +211,7 @@ export function applyLightweightFilters(trade: FilterTrade, context: FilterConte
       trade.market,
       trade.marketSlug,
       trade.title,
+      trade.question,
       trade.outcome,
       trade.outcomeName,
     ].filter(Boolean) as string[];
@@ -176,7 +220,15 @@ export function applyLightweightFilters(trade: FilterTrade, context: FilterConte
       return { pass: false, reason: 'market_metadata_missing' };
     }
 
-    const isCryptoMarket = marketTexts.some(textContainsCrypto);
+    const cryptoMatch = getCryptoMarketMatch(trade);
+    const isCryptoMarket = Boolean(cryptoMatch.matchedKeyword) || marketTexts.some(textContainsCrypto);
+    console.log('[Market Scope]', {
+      marketTitle: trade.title || trade.market || trade.question || null,
+      marketSlug: trade.marketSlug || null,
+      matchedKeyword: cryptoMatch.matchedKeyword,
+      matchedField: cryptoMatch.matchedField,
+      result: isCryptoMarket ? 'crypto' : 'non_crypto',
+    });
     if (!isCryptoMarket) {
       return { pass: false, reason: 'non_crypto_market' };
     }

@@ -545,18 +545,30 @@ export class TradeExecutor {
 
   private async resolvePrewarmTokenIds(): Promise<PrewarmResolutionResult> {
     try {
-      const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
-        params: {
-          limit: 500,
-        },
-        timeout: 15_000,
-      });
-
       const keywords = config.monitoring.prewarmSymbols;
       const targets = new Map<string, PrewarmTarget>();
       const foundSymbols = new Set<string>();
       const missingSymbols = new Set<string>(keywords);
-      const markets = Array.isArray(data) ? data : [];
+      const markets: any[] = [];
+      const pageSize = 200;
+
+      for (let offset = 0; offset < 1000; offset += pageSize) {
+        const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
+          params: {
+            limit: pageSize,
+            offset,
+          },
+          timeout: 15_000,
+        });
+        const batch = Array.isArray(data) ? data : [];
+        if (batch.length === 0) {
+          break;
+        }
+        markets.push(...batch);
+        if (batch.length < pageSize) {
+          break;
+        }
+      }
 
       for (const symbol of keywords) {
         for (const market of markets) {
@@ -566,6 +578,7 @@ export class TradeExecutor {
             market?.market,
             market?.slug,
             market?.market_slug,
+            market?.ticker,
           ]
             .filter(Boolean)
             .map((value: any) => String(value).toLowerCase());
