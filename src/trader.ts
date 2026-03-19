@@ -547,7 +547,11 @@ export class TradeExecutor {
     console.log('[Orderbook Prewarm Rule Summary]', {
       symbolRule: 'strict crypto token/word match',
       marketTypeRule: 'crypto market must also be up/down',
-      upDownSignals: ['title contains "up or down"', 'slug token contains "updown"', 'slug text contains "updown"'],
+      upDownSignals: [
+        'title contains "up or down"',
+        'slug contains "updown"',
+        'slug contains "up-or-down"',
+      ],
     });
     const resolution = await this.resolvePrewarmTokenIds();
     console.log('[Orderbook Prewarm Markets]', {
