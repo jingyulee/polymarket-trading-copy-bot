@@ -636,10 +636,16 @@ export class TradeExecutor {
 
     const markets: any[] = [];
     const pageSize = 200;
+    console.log('[Orderbook Prewarm Markets Endpoint]', GAMMA_MARKETS_URL);
 
     for (let offset = 0; offset < 2000; offset += pageSize) {
       try {
-        const { data } = await axios.get<any[]>(`${DATA_API_BASE}/markets`, {
+        console.log('[Orderbook Prewarm Markets Fetch]', {
+          endpoint: GAMMA_MARKETS_URL,
+          pageSize,
+          offset,
+        });
+        const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
           params: {
             active: true,
             closed: false,
@@ -651,6 +657,12 @@ export class TradeExecutor {
         });
 
         const batch = Array.isArray(data) ? data : [];
+        console.log('[Orderbook Prewarm Markets Fetch Result]', {
+          endpoint: GAMMA_MARKETS_URL,
+          pageSize,
+          offset,
+          fetchedMarketsCount: batch.length,
+        });
         if (batch.length === 0) {
           break;
         }
@@ -661,9 +673,20 @@ export class TradeExecutor {
         }
       } catch (error: any) {
         console.log(`⚠️  Active/open market fetch failed at offset=${offset}: ${error?.message || 'Unknown error'}`);
+        console.log('[Orderbook Prewarm Markets Fetch Error]', {
+          endpoint: GAMMA_MARKETS_URL,
+          pageSize,
+          offset,
+        });
         break;
       }
     }
+
+    console.log('[Orderbook Prewarm Markets Loaded]', {
+      endpoint: GAMMA_MARKETS_URL,
+      pageSize,
+      totalMarketsCount: markets.length,
+    });
 
     this.activeMarketsCache = {
       markets,
