@@ -42,6 +42,12 @@ interface PrewarmSymbolMatch {
   matchedField: 'slug_token' | 'title_word';
 }
 
+interface PrewarmMarketEvaluation {
+  symbolMatches: PrewarmSymbolMatch[];
+  isUpDown: boolean;
+  upDownField?: 'title_phrase' | 'slug_token' | 'slug_text';
+}
+
 interface PrewarmResolutionResult {
   targets: PrewarmTarget[];
   foundSymbols: string[];
@@ -538,6 +544,11 @@ export class TradeExecutor {
       return;
     }
 
+    console.log('[Orderbook Prewarm Rule Summary]', {
+      symbolRule: 'strict crypto token/word match',
+      marketTypeRule: 'crypto market must also be up/down',
+      upDownSignals: ['title contains "up or down"', 'slug token contains "updown"', 'slug text contains "updown"'],
+    });
     const resolution = await this.resolvePrewarmTokenIds();
     console.log('[Orderbook Prewarm Markets]', {
       loadedMarketsCount: resolution.loadedMarketsCount,
@@ -584,13 +595,8 @@ export class TradeExecutor {
       const markets = await this.loadActiveOpenMarkets();
 
       for (const market of markets) {
-        const matches = this.matchPrewarmSymbolsForMarket(market);
-        if (matches.length === 0) {
-          continue;
-        }
-
-        const tokenIds = this.extractTokenIdsFromMarket(market);
-        if (tokenIds.length === 0) {
+        const evaluation = this.evaluatePrewarmMarket(market);
+        if (evaluation.symbolMatches.length === 0) {
           continue;
         }
 
@@ -607,10 +613,26 @@ export class TradeExecutor {
           ''
         );
 
-        for (const match of matches) {
+        if (!evaluation.isUpDown) {
+          console.log('[Orderbook Prewarm Skipped Crypto Market]', {
+            reason: 'not_updown',
+            matchedSymbols: evaluation.symbolMatches.map((match) => match.symbol),
+            marketTitle,
+            marketSlug,
+          });
+          continue;
+        }
+
+        const tokenIds = this.extractTokenIdsFromMarket(market);
+        if (tokenIds.length === 0) {
+          continue;
+        }
+
+        for (const match of evaluation.symbolMatches) {
           console.log('[Orderbook Prewarm Match]', {
             matchedSymbol: match.symbol,
             matchedField: match.matchedField,
+            upDownField: evaluation.upDownField,
             marketTitle,
             marketSlug,
           });
@@ -619,7 +641,7 @@ export class TradeExecutor {
         }
 
         for (const tokenId of tokenIds) {
-          const primaryMatch = matches[0];
+          const primaryMatch = evaluation.symbolMatches[0];
           targets.set(tokenId, {
             tokenId,
             symbol: primaryMatch.symbol,
@@ -817,6 +839,49 @@ export class TradeExecutor {
     }
 
     return matches;
+  }
+
+  private detectPrewarmUpDownMarket(market: any): {
+    isUpDown: boolean;
+    field?: 'title_phrase' | 'slug_token' | 'slug_text';
+  } {
+    const titleText = String(
+      market?.question ||
+      market?.title ||
+      market?.market ||
+      ''
+    ).toLowerCase();
+    if (titleText.includes('up or down')) {
+      return { isUpDown: true, field: 'title_phrase' };
+    }
+
+    const slugText = String(
+      market?.slug ||
+      market?.marketSlug ||
+      market?.market_slug ||
+      market?.ticker ||
+      ''
+    ).toLowerCase();
+    if (slugText.includes('updown')) {
+      return { isUpDown: true, field: 'slug_text' };
+    }
+
+    const slugTokens = this.tokenizePrewarmText(slugText);
+    if (slugTokens.includes('updown')) {
+      return { isUpDown: true, field: 'slug_token' };
+    }
+
+    return { isUpDown: false };
+  }
+
+  private evaluatePrewarmMarket(market: any): PrewarmMarketEvaluation {
+    const symbolMatches = this.matchPrewarmSymbolsForMarket(market);
+    const upDown = this.detectPrewarmUpDownMarket(market);
+    return {
+      symbolMatches,
+      isUpDown: upDown.isUpDown,
+      upDownField: upDown.field,
+    };
   }
 
   private getMarketCacheKey(market: any): string {
