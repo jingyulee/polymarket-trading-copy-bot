@@ -21,6 +21,8 @@
 - startup prewarm 現在使用 strict symbol matching，避免 `eth` / `sol` 類型的子字串誤命中
 - BUY execution 在 asks 為空但 bids 存在時，可走 complementary-price fallback
 - fallback 使用 complementary price 搭配 price gap / range / tick guards，並優先用 FAK
+- filter 層現在會對可執行的 no-asks BUY 單做 bypass，讓 fallback execution 真正接手
+- high-liquidity symbol gate 現在放寬到 btc/eth/sol/xrp/doge/bnb/hyperliquid
 - 新增過濾條件後，主要會再觀察 `not_high_liquidity_symbol`、`spread_too_wide`、`asks_depth_too_low`、`maker_fallback_bid_too_low`
 - 目前剩下的是「哪些 BUY 值得追」的策略問題
 

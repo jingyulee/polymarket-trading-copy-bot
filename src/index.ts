@@ -42,6 +42,15 @@ class PolymarketCopyBot {
     tradesSkipped: 0,
     totalVolume: 0,
   };
+  private readonly fallbackLiquiditySymbols: Array<{ symbol: string; aliases: string[] }> = [
+    { symbol: 'bitcoin', aliases: ['bitcoin', 'btc'] },
+    { symbol: 'ethereum', aliases: ['ethereum', 'eth'] },
+    { symbol: 'solana', aliases: ['solana', 'sol'] },
+    { symbol: 'xrp', aliases: ['xrp'] },
+    { symbol: 'dogecoin', aliases: ['dogecoin', 'doge'] },
+    { symbol: 'bnb', aliases: ['bnb'] },
+    { symbol: 'hyperliquid', aliases: ['hyperliquid', 'hype'] },
+  ];
 
   constructor() {
     this.monitor = new TradeMonitor();
@@ -156,6 +165,65 @@ class PolymarketCopyBot {
     }
   }
 
+  private matchLiquiditySymbol(trade: Trade): string | null {
+    const texts = [
+      trade.title,
+      trade.market,
+      trade.question,
+      trade.marketSlug,
+      trade.outcome,
+      trade.outcomeName,
+    ]
+      .filter(Boolean)
+      .map((value) => String(value).toLowerCase());
+
+    for (const entry of this.fallbackLiquiditySymbols) {
+      if (entry.aliases.some((alias) => texts.some((text) => text.includes(alias)))) {
+        return entry.symbol;
+      }
+    }
+    return null;
+  }
+
+  private getLiquiditySymbolCheck(trade: Trade): { matchedSymbol: string | null; allowed: boolean } {
+    const matchedSymbol = this.matchLiquiditySymbol(trade);
+    const allowed = Boolean(matchedSymbol);
+    console.log('[Liquidity Symbol Check]', {
+      marketTitle: trade.title || trade.market || trade.question || null,
+      marketSlug: trade.marketSlug || null,
+      matchedSymbol,
+      allowed,
+    });
+    return { matchedSymbol, allowed };
+  }
+
+  private shouldBypassNoAsksFilter(trade: Trade, marketSnapshot: {
+    bestBid: number | null;
+    bidsDepth: number;
+    asksDepth: number;
+  }): boolean {
+    const shouldBypass = Boolean(
+      config.trading.enableNoAsksFallback &&
+      trade.side === 'BUY' &&
+      marketSnapshot.asksDepth === 0 &&
+      marketSnapshot.bestBid != null &&
+      marketSnapshot.bidsDepth > 0
+    );
+
+    if (shouldBypass) {
+      console.log('[NoAsks Filter Bypass]', {
+        tokenId: trade.tokenId,
+        market: trade.market,
+        bestBid: marketSnapshot.bestBid,
+        bidsDepth: marketSnapshot.bidsDepth,
+        asksDepth: marketSnapshot.asksDepth,
+        fallbackEnabled: true,
+      });
+    }
+
+    return shouldBypass;
+  }
+
   private async handleNewTrade(trade: Trade): Promise<void> {
     if (trade.outcome === 'UNKNOWN') {
       const mappedOutcome = await this.executor.getOutcomeLabel(trade.tokenId);
@@ -192,11 +260,13 @@ class PolymarketCopyBot {
     console.log(`   Age: ${sourceAgeMs}ms`);
     console.log('='.repeat(50));
 
+    const liquiditySymbolCheck = this.getLiquiditySymbolCheck(trade);
     const lightweightFilterResult = applyLightweightFilters(trade, {
       now: Date.now(),
     });
 
-    if (!lightweightFilterResult.pass) {
+    const bypassLiquidityGate = lightweightFilterResult.reason === 'not_high_liquidity_symbol' && liquiditySymbolCheck.allowed;
+    if (!lightweightFilterResult.pass && !bypassLiquidityGate) {
       this.recordTradeLog(trade, {
         action: 'skip',
         reason: lightweightFilterResult.reason,
@@ -205,6 +275,9 @@ class PolymarketCopyBot {
       console.log(`⚠️  Lightweight filter skipped trade: ${lightweightFilterResult.reason}`);
       this.printStats();
       return;
+    }
+    if (bypassLiquidityGate) {
+      console.log('ℹ️  Bypassing lightweight liquidity gate for configured crypto symbol');
     }
 
     if (this.wsMonitor) {
@@ -235,13 +308,21 @@ class PolymarketCopyBot {
       marketLocks: this.marketLocks,
     });
 
-    if (!filterResult.pass) {
+    const bypassNoAsksFilter = filterResult.reason === 'no_asks_in_orderbook' && this.shouldBypassNoAsksFilter(trade, {
+      bestBid,
+      bidsDepth,
+      asksDepth,
+    });
+    const noLiquidityBothSides = filterResult.reason === 'no_asks_in_orderbook' && asksDepth === 0 && (bestBid == null || bidsDepth === 0);
+
+    if (!filterResult.pass && !bypassNoAsksFilter) {
+      const resolvedReason = noLiquidityBothSides ? 'no_liquidity_both_sides' : filterResult.reason;
       this.recordTradeLog(trade, {
         action: 'skip',
-        reason: filterResult.reason,
+        reason: resolvedReason,
         sourceAgeMs,
       });
-      console.log(`⚠️  Filter skipped trade: ${filterResult.reason}`);
+      console.log(`⚠️  Filter skipped trade: ${resolvedReason}`);
       console.log('   Filter market snapshot:', {
         bestBid,
         bestAsk,
@@ -251,6 +332,9 @@ class PolymarketCopyBot {
       });
       this.printStats();
       return;
+    }
+    if (bypassNoAsksFilter) {
+      console.log('ℹ️  Bypassing no_asks_in_orderbook filter so fallback execution can handle the trade');
     }
 
     const copyNotional = this.executor.calculateCopySize(trade.size);

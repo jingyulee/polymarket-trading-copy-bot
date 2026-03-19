@@ -69,7 +69,7 @@ export const config = {
     copyOnlyBuy: parseBoolean(process.env.COPY_ONLY_BUY, true),
     minSourcePrice: parseNumber(process.env.MIN_SOURCE_PRICE, 0.97),
     maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
-    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 30000),
+    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 35000),
     minSourceTradeUsd: parseNumber(process.env.MIN_SOURCE_TRADE_USD, 2),
     maxUsdPerOrder: parseNumber(process.env.MAX_USD_PER_ORDER, 5),
     marketScope: process.env.MARKET_SCOPE || 'crypto-only',
@@ -87,7 +87,7 @@ export const config = {
     onlyHighLiquiditySymbols: parseBoolean(process.env.ONLY_HIGH_LIQUIDITY_SYMBOLS, true),
     enableNoAsksFallback: parseBoolean(process.env.ENABLE_NO_ASKS_FALLBACK, true),
     noAsksFallbackOrderType: parseImmediateOrderType(process.env.NO_ASKS_FALLBACK_ORDER_TYPE, 'FAK'),
-    maxFallbackPriceGapBps: parseNumber(process.env.MAX_FALLBACK_PRICE_GAP_BPS, 100),
+    maxFallbackPriceGapBps: parseNumber(process.env.MAX_FALLBACK_PRICE_GAP_BPS, 300),
   },
 
   risk: {
@@ -156,4 +156,5 @@ export function validateConfig(): void {
     `   No-asks fallback: ${config.trading.enableNoAsksFallback ? 'enabled' : 'disabled'} ` +
     `(orderType=${config.trading.noAsksFallbackOrderType}, maxGap=${config.trading.maxFallbackPriceGapBps}bps)`
   );
+  console.log(`   Max source trade age: ${config.trading.maxSourceTradeAgeMs}ms`);
 }

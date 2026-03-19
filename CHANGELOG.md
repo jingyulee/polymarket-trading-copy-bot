@@ -6,6 +6,9 @@
 - feat: add no-asks fallback execution path for BUY orders using complementary price with guards
 - improve: prefer FAK in no-asks fallback path to improve fill probability
 - chore: add prewarm match logs with matched symbol, matched field, market title, and market slug
+- fix: bypass `no_asks_in_orderbook` filter when no-asks fallback can still execute against live bids
+- fix: relax crypto liquidity gate for btc/eth/sol/xrp/doge/bnb/hype symbols
+- tweak: raise default `MAX_SOURCE_TRADE_AGE_MS` to 35000 and `MAX_FALLBACK_PRICE_GAP_BPS` to 300 for execution testing
 
 - 發現 `big-nunber` 與 `ts-bign` 兩個已知可疑 typo-squatting 套件，同時存在於 `package.json` 與實際 import 路徑。
 - 由於污染依賴已進入執行路徑，原 repo 不應再被視為可直接信任的執行基線。

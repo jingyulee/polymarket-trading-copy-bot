@@ -1063,6 +1063,18 @@ export class TradeExecutor {
     }
 
     if (bidsDepth <= 0 || bestBid == null) {
+      console.log('[Fallback Execution]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        bestBid,
+        bestAsk,
+        fallbackPrice: null,
+        orderType: fallbackOrderType,
+        sourcePrice: originalTrade.price,
+        maxGapBps: config.trading.maxFallbackPriceGapBps,
+        gapBps: null,
+        skipReason: 'no_liquidity_both_sides',
+      });
       console.log('[NoAsks Fallback]', {
         ...baseLog,
         skipReason: 'no_liquidity_both_sides',
@@ -1072,6 +1084,18 @@ export class TradeExecutor {
 
     const rawFallbackPrice = 1 - bestBid;
     if (!Number.isFinite(rawFallbackPrice) || rawFallbackPrice <= 0) {
+      console.log('[Fallback Execution]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        bestBid,
+        bestAsk,
+        fallbackPrice: rawFallbackPrice,
+        orderType: fallbackOrderType,
+        sourcePrice: originalTrade.price,
+        maxGapBps: config.trading.maxFallbackPriceGapBps,
+        gapBps: null,
+        skipReason: 'invalid_fallback_price',
+      });
       console.log('[NoAsks Fallback]', {
         ...baseLog,
         fallbackPrice: rawFallbackPrice,
@@ -1093,6 +1117,18 @@ export class TradeExecutor {
     const fallbackPrice = await this.validatePrice(slippageAdjusted, originalTrade.tokenId);
 
     if (!Number.isFinite(fallbackPrice) || fallbackPrice <= 0.01 || fallbackPrice >= 0.99) {
+      console.log('[Fallback Execution]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        bestBid,
+        bestAsk,
+        fallbackPrice,
+        orderType: fallbackOrderType,
+        sourcePrice: originalTrade.price,
+        maxGapBps: config.trading.maxFallbackPriceGapBps,
+        gapBps: null,
+        skipReason: 'fallback_price_out_of_range',
+      });
       console.log('[NoAsks Fallback]', {
         ...baseLog,
         fallbackPrice,
@@ -1103,6 +1139,18 @@ export class TradeExecutor {
 
     const fallbackGapBps = this.getPriceGapBps(originalTrade.price, fallbackPrice);
     if (fallbackGapBps > config.trading.maxFallbackPriceGapBps) {
+      console.log('[Fallback Execution]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        bestBid,
+        bestAsk,
+        fallbackPrice,
+        orderType: fallbackOrderType,
+        sourcePrice: originalTrade.price,
+        maxGapBps: config.trading.maxFallbackPriceGapBps,
+        gapBps: fallbackGapBps,
+        skipReason: 'fallback_price_gap_too_wide',
+      });
       console.log('[NoAsks Fallback]', {
         ...baseLog,
         fallbackPrice,
@@ -1114,6 +1162,18 @@ export class TradeExecutor {
 
     const entryGapBps = this.getPriceGapBps(originalTrade.price, fallbackPrice);
     if (entryGapBps > config.trading.maxEntryPriceGapBps) {
+      console.log('[Fallback Execution]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        bestBid,
+        bestAsk,
+        fallbackPrice,
+        orderType: fallbackOrderType,
+        sourcePrice: originalTrade.price,
+        maxGapBps: config.trading.maxFallbackPriceGapBps,
+        gapBps: entryGapBps,
+        skipReason: 'fallback_price_gap_too_wide',
+      });
       console.log('[NoAsks Fallback]', {
         ...baseLog,
         fallbackPrice,
@@ -1148,6 +1208,18 @@ export class TradeExecutor {
     }
 
     const copyShares = this.calculateSharesFromNotional(copyNotional, plan.fallbackPrice);
+    const gapBps = this.getPriceGapBps(originalTrade.price, plan.fallbackPrice);
+    console.log('[Fallback Execution]', {
+      tokenId: originalTrade.tokenId,
+      market: originalTrade.market,
+      bestBid: plan.bestBid,
+      bestAsk: plan.bestAsk,
+      fallbackPrice: plan.fallbackPrice,
+      orderType: plan.finalOrderType,
+      sourcePrice: originalTrade.price,
+      maxGapBps: config.trading.maxFallbackPriceGapBps,
+      gapBps,
+    });
     console.log(`   fallbackUsed: ${plan.fallbackUsed}`);
     console.log(`   bestBid: ${plan.bestBid}`);
     console.log(`   bestAsk: ${plan.bestAsk ?? 'N/A'}`);
