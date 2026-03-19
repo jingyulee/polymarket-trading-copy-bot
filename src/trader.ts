@@ -614,9 +614,8 @@ export class TradeExecutor {
         );
 
         if (!evaluation.isUpDown) {
-          console.log('[Orderbook Prewarm Skipped Crypto Market]', {
+          console.log('[Prewarm Skipped Crypto Market]', {
             reason: 'not_updown',
-            matchedSymbols: evaluation.symbolMatches.map((match) => match.symbol),
             marketTitle,
             marketSlug,
           });
@@ -629,12 +628,14 @@ export class TradeExecutor {
         }
 
         for (const match of evaluation.symbolMatches) {
-          console.log('[Orderbook Prewarm Match]', {
+          console.log('[Prewarm Match]', {
+            marketTitle,
+            marketSlug,
+            matchedSymbols: evaluation.symbolMatches.map((item) => item.symbol),
+            updownMatched: true,
             matchedSymbol: match.symbol,
             matchedField: match.matchedField,
             upDownField: evaluation.upDownField,
-            marketTitle,
-            marketSlug,
           });
           foundSymbols.add(match.symbol);
           missingSymbols.delete(match.symbol);
@@ -841,6 +842,17 @@ export class TradeExecutor {
     return matches;
   }
 
+  private isUpDownMarket(title: string, slug: string): boolean {
+    const t = String(title || '').toLowerCase();
+    const s = String(slug || '').toLowerCase();
+
+    return (
+      t.includes('up or down') ||
+      s.includes('updown') ||
+      s.includes('up-or-down')
+    );
+  }
+
   private detectPrewarmUpDownMarket(market: any): {
     isUpDown: boolean;
     field?: 'title_phrase' | 'slug_token' | 'slug_text';
@@ -850,19 +862,28 @@ export class TradeExecutor {
       market?.title ||
       market?.market ||
       ''
-    ).toLowerCase();
-    if (titleText.includes('up or down')) {
-      return { isUpDown: true, field: 'title_phrase' };
-    }
-
+    );
     const slugText = String(
       market?.slug ||
       market?.marketSlug ||
       market?.market_slug ||
       market?.ticker ||
       ''
-    ).toLowerCase();
-    if (slugText.includes('updown')) {
+    );
+
+    if (!this.isUpDownMarket(titleText, slugText)) {
+      return { isUpDown: false };
+    }
+
+    if (titleText.toLowerCase().includes('up or down')) {
+      return { isUpDown: true, field: 'title_phrase' };
+    }
+
+    const normalizedSlug = slugText.toLowerCase();
+    if (normalizedSlug.includes('up-or-down')) {
+      return { isUpDown: true, field: 'slug_text' };
+    }
+    if (normalizedSlug.includes('updown')) {
       return { isUpDown: true, field: 'slug_text' };
     }
 
