@@ -21,6 +21,11 @@ function parseNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseImmediateOrderType(value: string | undefined, fallback: 'FOK' | 'FAK'): 'FOK' | 'FAK' {
+  const normalized = String(value || '').trim().toUpperCase();
+  return normalized === 'FOK' || normalized === 'FAK' ? normalized : fallback;
+}
+
 function parseSigType(): 0 | 1 | 2 {
   const v = process.env.SIG_TYPE ?? '0';
   const n = parseInt(v, 10);
@@ -80,6 +85,9 @@ export const config = {
     maxSpreadForEntry: parseNumber(process.env.MAX_SPREAD_FOR_ENTRY, 0.05),
     minAsksDepth: parseNumber(process.env.MIN_ASKS_DEPTH, 1),
     onlyHighLiquiditySymbols: parseBoolean(process.env.ONLY_HIGH_LIQUIDITY_SYMBOLS, true),
+    enableNoAsksFallback: parseBoolean(process.env.ENABLE_NO_ASKS_FALLBACK, true),
+    noAsksFallbackOrderType: parseImmediateOrderType(process.env.NO_ASKS_FALLBACK_ORDER_TYPE, 'FAK'),
+    maxFallbackPriceGapBps: parseNumber(process.env.MAX_FALLBACK_PRICE_GAP_BPS, 100),
   },
 
   risk: {
@@ -99,6 +107,7 @@ export const config = {
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
+    prewarmMatchMode: (process.env.PREWARM_MATCH_MODE || 'strict').trim().toLowerCase(),
     orderbookCacheTtlMs: parseNumber(process.env.ORDERBOOK_CACHE_TTL_MS, 5000),
     redeemCheckIntervalMs: Number(process.env.REDEEM_CHECK_INTERVAL_MS || 60000),
     settlementCheckIntervalMs: Number(process.env.SETTLEMENT_CHECK_INTERVAL_MS || 60000),
@@ -141,6 +150,10 @@ export function validateConfig(): void {
   console.log(`   Auth: ${authLabel} (signature type ${sigType})`);
   console.log(
     `   Orderbook prewarm: ${config.monitoring.enableOrderbookPrewarm ? 'enabled' : 'disabled'} ` +
-    `(ttl=${config.monitoring.orderbookCacheTtlMs}ms, symbols=${config.monitoring.prewarmSymbols.join(',') || 'none'})`
+    `(ttl=${config.monitoring.orderbookCacheTtlMs}ms, symbols=${config.monitoring.prewarmSymbols.join(',') || 'none'}, matchMode=${config.monitoring.prewarmMatchMode})`
+  );
+  console.log(
+    `   No-asks fallback: ${config.trading.enableNoAsksFallback ? 'enabled' : 'disabled'} ` +
+    `(orderType=${config.trading.noAsksFallbackOrderType}, maxGap=${config.trading.maxFallbackPriceGapBps}bps)`
   );
 }

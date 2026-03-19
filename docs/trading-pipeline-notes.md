@@ -18,6 +18,9 @@
 - 很多來源 BUY 在實際 orderbook 中 asks=0
 - maker fallback 在極低 best bid（如 0.01）時通常不成交
 - stale_trade 與 no_asks_in_orderbook 目前是主要 skip 原因
+- startup prewarm 現在使用 strict symbol matching，避免 `eth` / `sol` 類型的子字串誤命中
+- BUY execution 在 asks 為空但 bids 存在時，可走 complementary-price fallback
+- fallback 使用 complementary price 搭配 price gap / range / tick guards，並優先用 FAK
 - 新增過濾條件後，主要會再觀察 `not_high_liquidity_symbol`、`spread_too_wide`、`asks_depth_too_low`、`maker_fallback_bid_too_low`
 - 目前剩下的是「哪些 BUY 值得追」的策略問題
 

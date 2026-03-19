@@ -1,5 +1,12 @@
 # 2026-03-16 安全重建紀錄
 
+# 2026-03-20 Prewarm and No-Asks Execution Improvements
+
+- feat: tighten prewarm symbol matching to token/word-level strict matching to avoid false positives
+- feat: add no-asks fallback execution path for BUY orders using complementary price with guards
+- improve: prefer FAK in no-asks fallback path to improve fill probability
+- chore: add prewarm match logs with matched symbol, matched field, market title, and market slug
+
 - 發現 `big-nunber` 與 `ts-bign` 兩個已知可疑 typo-squatting 套件，同時存在於 `package.json` 與實際 import 路徑。
 - 由於污染依賴已進入執行路徑，原 repo 不應再被視為可直接信任的執行基線。
 - 已移除可疑依賴與對應 import，改用原生數值運算取代部位僅限持倉平均價與總額計算。

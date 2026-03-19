@@ -37,6 +37,11 @@ interface PrewarmTarget {
   symbol: string;
 }
 
+interface PrewarmSymbolMatch {
+  symbol: string;
+  matchedField: 'slug_token' | 'title_word';
+}
+
 interface PrewarmResolutionResult {
   targets: PrewarmTarget[];
   foundSymbols: string[];
@@ -49,6 +54,14 @@ interface PrewarmResolutionResult {
 interface ActiveMarketsCacheEntry {
   markets: any[];
   timestamp: number;
+}
+
+interface NoAsksFallbackPlan {
+  fallbackUsed: boolean;
+  fallbackPrice: number;
+  finalOrderType: 'FOK' | 'FAK';
+  bestBid: number;
+  bestAsk: number | null;
 }
 
 export interface CopyExecutionResult {
@@ -563,48 +576,58 @@ export class TradeExecutor {
 
   private async resolvePrewarmTokenIds(): Promise<PrewarmResolutionResult> {
     try {
-      const keywords = config.monitoring.prewarmSymbols;
       const targets = new Map<string, PrewarmTarget>();
       const foundSymbols = new Set<string>();
-      const missingSymbols = new Set<string>(keywords);
+      const strictSymbols = this.getStrictPrewarmSymbols();
+      const missingSymbols = new Set<string>(strictSymbols);
       const matchedMarkets = new Set<string>();
       const markets = await this.loadActiveOpenMarkets();
 
-      for (const symbol of keywords) {
-        for (const market of markets) {
-          const haystacks = this.getPrewarmMarketHaystacks(market);
-
-          const matches = haystacks.some((text) => text.includes(symbol));
-          if (!matches) {
-            continue;
-          }
-
-          const tokenIds = this.extractTokenIdsFromMarket(market);
-          let matchedToken = false;
-          for (const tokenId of tokenIds) {
-            if (tokenId) {
-              matchedToken = true;
-              targets.set(tokenId, {
-                tokenId,
-                symbol,
-                market: String(
-                  market?.question ||
-                  market?.title ||
-                  market?.market ||
-                  market?.slug ||
-                  market?.market_slug ||
-                  'unknown-market'
-                ),
-              });
-            }
-          }
-
-          if (matchedToken) {
-            matchedMarkets.add(this.getMarketCacheKey(market));
-            foundSymbols.add(symbol);
-            missingSymbols.delete(symbol);
-          }
+      for (const market of markets) {
+        const matches = this.matchPrewarmSymbolsForMarket(market);
+        if (matches.length === 0) {
+          continue;
         }
+
+        const tokenIds = this.extractTokenIdsFromMarket(market);
+        if (tokenIds.length === 0) {
+          continue;
+        }
+
+        const marketTitle = String(
+          market?.question ||
+          market?.title ||
+          market?.market ||
+          'unknown-market'
+        );
+        const marketSlug = String(
+          market?.slug ||
+          market?.marketSlug ||
+          market?.market_slug ||
+          ''
+        );
+
+        for (const match of matches) {
+          console.log('[Orderbook Prewarm Match]', {
+            matchedSymbol: match.symbol,
+            matchedField: match.matchedField,
+            marketTitle,
+            marketSlug,
+          });
+          foundSymbols.add(match.symbol);
+          missingSymbols.delete(match.symbol);
+        }
+
+        for (const tokenId of tokenIds) {
+          const primaryMatch = matches[0];
+          targets.set(tokenId, {
+            tokenId,
+            symbol: primaryMatch.symbol,
+            market: marketTitle,
+          });
+        }
+
+        matchedMarkets.add(this.getMarketCacheKey(market));
       }
 
       return {
@@ -696,18 +719,104 @@ export class TradeExecutor {
     return markets;
   }
 
-  private getPrewarmMarketHaystacks(market: any): string[] {
-    return [
-      market?.question,
-      market?.title,
-      market?.market,
-      market?.slug,
-      market?.marketSlug,
-      market?.market_slug,
-      market?.ticker,
-    ]
-      .filter(Boolean)
-      .map((value: any) => String(value).toLowerCase());
+  private getStrictPrewarmSymbols(): string[] {
+    const strictSymbols = new Set<string>();
+    for (const symbol of config.monitoring.prewarmSymbols) {
+      const normalized = this.normalizePrewarmAlias(symbol);
+      if (normalized) {
+        strictSymbols.add(normalized);
+      }
+    }
+    return Array.from(strictSymbols);
+  }
+
+  private normalizePrewarmAlias(symbol: string): string | undefined {
+    const normalized = String(symbol || '').trim().toLowerCase();
+    if (!normalized) return undefined;
+
+    if (normalized === 'btc' || normalized === 'bitcoin') return 'bitcoin';
+    if (normalized === 'eth' || normalized === 'ethereum') return 'ethereum';
+    if (normalized === 'sol' || normalized === 'solana') return 'solana';
+    if (normalized === 'bnb') return 'bnb';
+    if (normalized === 'xrp') return 'xrp';
+    if (normalized === 'hyperliquid' || normalized === 'hype') return 'hyperliquid';
+    return undefined;
+  }
+
+  private getPrewarmSymbolTokens(symbol: string): string[] {
+    switch (symbol) {
+      case 'bitcoin':
+        return ['bitcoin', 'btc'];
+      case 'ethereum':
+        return ['ethereum', 'eth'];
+      case 'solana':
+        return ['solana', 'sol'];
+      case 'bnb':
+        return ['bnb'];
+      case 'xrp':
+        return ['xrp'];
+      case 'hyperliquid':
+        return ['hyperliquid', 'hype'];
+      default:
+        return [symbol];
+    }
+  }
+
+  private tokenizePrewarmText(value: any): string[] {
+    return String(value || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .map((token) => token.trim())
+      .filter(Boolean);
+  }
+
+  private matchPrewarmSymbolsForMarket(market: any): PrewarmSymbolMatch[] {
+    const matches: PrewarmSymbolMatch[] = [];
+    if (config.monitoring.prewarmMatchMode !== 'strict') {
+      const haystacks = [
+        market?.question,
+        market?.title,
+        market?.market,
+        market?.slug,
+        market?.marketSlug,
+        market?.market_slug,
+        market?.ticker,
+      ]
+        .filter(Boolean)
+        .map((value: any) => String(value).toLowerCase());
+      for (const symbol of this.getStrictPrewarmSymbols()) {
+        const candidateTokens = this.getPrewarmSymbolTokens(symbol);
+        if (candidateTokens.some((token) => haystacks.some((text) => text.includes(token)))) {
+          matches.push({ symbol, matchedField: 'title_word' });
+        }
+      }
+      return matches;
+    }
+
+    const slugTokens = new Set(this.tokenizePrewarmText(
+      market?.slug ||
+      market?.marketSlug ||
+      market?.market_slug ||
+      market?.ticker
+    ));
+    const titleTokens = new Set(this.tokenizePrewarmText(
+      market?.question ||
+      market?.title ||
+      market?.market
+    ));
+
+    for (const symbol of this.getStrictPrewarmSymbols()) {
+      const candidateTokens = this.getPrewarmSymbolTokens(symbol);
+      if (candidateTokens.some((token) => slugTokens.has(token))) {
+        matches.push({ symbol, matchedField: 'slug_token' });
+        continue;
+      }
+      if (candidateTokens.some((token) => titleTokens.has(token))) {
+        matches.push({ symbol, matchedField: 'title_word' });
+      }
+    }
+
+    return matches;
   }
 
   private getMarketCacheKey(market: any): string {
@@ -813,6 +922,183 @@ export class TradeExecutor {
       return false;
     }
     return true;
+  }
+
+  private getTopOfBook(orderbook: any): {
+    bestBid: number | null;
+    bestAsk: number | null;
+    bidsDepth: number;
+    asksDepth: number;
+  } {
+    const bestBidValue = Number(orderbook?.bids?.[0]?.price);
+    const bestAskValue = Number(orderbook?.asks?.[0]?.price);
+    return {
+      bestBid: Number.isFinite(bestBidValue) ? bestBidValue : null,
+      bestAsk: Number.isFinite(bestAskValue) ? bestAskValue : null,
+      bidsDepth: Array.isArray(orderbook?.bids) ? orderbook.bids.length : 0,
+      asksDepth: Array.isArray(orderbook?.asks) ? orderbook.asks.length : 0,
+    };
+  }
+
+  private getPriceGapBps(referencePrice: number, candidatePrice: number): number {
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0 || !Number.isFinite(candidatePrice) || candidatePrice <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Math.abs(candidatePrice - referencePrice) / referencePrice * 10000;
+  }
+
+  private async buildNoAsksFallbackPlan(
+    originalTrade: Trade,
+    orderbook: any
+  ): Promise<NoAsksFallbackPlan | null> {
+    const { bestBid, bestAsk, bidsDepth, asksDepth } = this.getTopOfBook(orderbook);
+    const fallbackOrderType = config.trading.noAsksFallbackOrderType === 'FOK' ? 'FOK' : 'FAK';
+
+    const baseLog = {
+      fallbackUsed: false,
+      bestBid,
+      bestAsk,
+      fallbackPrice: null as number | null,
+      finalOrderType: fallbackOrderType,
+    };
+
+    if (!config.trading.enableNoAsksFallback || originalTrade.side !== 'BUY') {
+      console.log('[NoAsks Fallback]', baseLog);
+      return null;
+    }
+
+    if (asksDepth > 0 && bestAsk != null) {
+      console.log('[NoAsks Fallback]', baseLog);
+      return null;
+    }
+
+    if (bidsDepth <= 0 || bestBid == null) {
+      console.log('[NoAsks Fallback]', {
+        ...baseLog,
+        skipReason: 'no_liquidity_both_sides',
+      });
+      throw new Error('SKIP:no_liquidity_both_sides');
+    }
+
+    const rawFallbackPrice = 1 - bestBid;
+    if (!Number.isFinite(rawFallbackPrice) || rawFallbackPrice <= 0) {
+      console.log('[NoAsks Fallback]', {
+        ...baseLog,
+        fallbackPrice: rawFallbackPrice,
+        skipReason: 'invalid_fallback_price',
+      });
+      throw new Error('SKIP:invalid_fallback_price');
+    }
+
+    if (bestBid <= 0.001) {
+      console.log('[NoAsks Fallback Extreme Bid]', {
+        bestBid,
+        rawFallbackPrice,
+        market: originalTrade.market,
+        tokenId: originalTrade.tokenId,
+      });
+    }
+
+    const slippageAdjusted = this.applySlippage(rawFallbackPrice, 'BUY', config.trading.slippageTolerance);
+    const fallbackPrice = await this.validatePrice(slippageAdjusted, originalTrade.tokenId);
+
+    if (!Number.isFinite(fallbackPrice) || fallbackPrice <= 0.01 || fallbackPrice >= 0.99) {
+      console.log('[NoAsks Fallback]', {
+        ...baseLog,
+        fallbackPrice,
+        skipReason: 'fallback_price_out_of_range',
+      });
+      throw new Error('SKIP:fallback_price_out_of_range');
+    }
+
+    const fallbackGapBps = this.getPriceGapBps(originalTrade.price, fallbackPrice);
+    if (fallbackGapBps > config.trading.maxFallbackPriceGapBps) {
+      console.log('[NoAsks Fallback]', {
+        ...baseLog,
+        fallbackPrice,
+        fallbackGapBps,
+        skipReason: 'fallback_price_gap_too_wide',
+      });
+      throw new Error('SKIP:fallback_price_gap_too_wide');
+    }
+
+    const entryGapBps = this.getPriceGapBps(originalTrade.price, fallbackPrice);
+    if (entryGapBps > config.trading.maxEntryPriceGapBps) {
+      console.log('[NoAsks Fallback]', {
+        ...baseLog,
+        fallbackPrice,
+        entryGapBps,
+        skipReason: 'fallback_price_gap_too_wide',
+      });
+      throw new Error('SKIP:fallback_price_gap_too_wide');
+    }
+
+    const plan: NoAsksFallbackPlan = {
+      fallbackUsed: true,
+      fallbackPrice,
+      finalOrderType: fallbackOrderType,
+      bestBid,
+      bestAsk,
+    };
+
+    console.log('[NoAsks Fallback]', plan);
+    return plan;
+  }
+
+  private async tryNoAsksBuyFallback(
+    originalTrade: Trade,
+    copyNotional: number,
+    orderbook: any,
+    orderOpts: any,
+    feeRateBps: number
+  ): Promise<CopyExecutionResult | null> {
+    const plan = await this.buildNoAsksFallbackPlan(originalTrade, orderbook);
+    if (!plan?.fallbackUsed) {
+      return null;
+    }
+
+    const copyShares = this.calculateSharesFromNotional(copyNotional, plan.fallbackPrice);
+    console.log(`   fallbackUsed: ${plan.fallbackUsed}`);
+    console.log(`   bestBid: ${plan.bestBid}`);
+    console.log(`   bestAsk: ${plan.bestAsk ?? 'N/A'}`);
+    console.log(`   fallbackPrice: ${plan.fallbackPrice.toFixed(4)}`);
+    console.log(`   finalOrderType: ${plan.finalOrderType}`);
+    console.log(`   Copy shares: ${copyShares}`);
+    console.log(`   feeRateBps: ${feeRateBps}`);
+
+    const orderTypeEnum = plan.finalOrderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+    const response = await this.clobClient.createAndPostMarketOrder(
+      {
+        tokenID: originalTrade.tokenId,
+        amount: copyNotional,
+        price: plan.fallbackPrice,
+        side: originalTrade.side as Side,
+        feeRateBps,
+        orderType: orderTypeEnum,
+      },
+      orderOpts,
+      orderTypeEnum
+    );
+
+    if (!response.success) {
+      const errorMsg = response.errorMsg || response.error || 'Unknown error';
+      console.log(`❌ No-asks fallback order failed: ${errorMsg}`);
+      throw new Error(`Order placement failed: ${errorMsg}`);
+    }
+
+    console.log(`✅ ${plan.finalOrderType} fallback order executed: ${response.orderID}`);
+    if (response.status === 'LIVE') {
+      console.log('   ⚠️  Fallback order posted to book (no immediate match)');
+    }
+
+    return {
+      orderId: response.orderID,
+      copyNotional,
+      copyShares,
+      price: plan.fallbackPrice,
+      side: originalTrade.side,
+      tokenId: originalTrade.tokenId,
+    };
   }
 
   async executeCopyTrade(
@@ -1173,11 +1459,29 @@ export class TradeExecutor {
     console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
 
     if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const noAsksFallbackResult = await this.tryNoAsksBuyFallback(
+        originalTrade,
+        copyNotional,
+        orderbook,
+        orderOpts,
+        feeRateBps
+      );
+      if (noAsksFallbackResult) {
+        return noAsksFallbackResult;
+      }
       const makerFallbackResult = await this.tryMakerFallback(originalTrade, copyNotional, orderbook);
       if (makerFallbackResult) {
         return makerFallbackResult;
       }
       const reason = originalTrade.side === 'BUY' ? 'no_asks_in_orderbook' : 'no_bids_in_orderbook';
+      console.log('[NoAsks Fallback]', {
+        fallbackUsed: false,
+        bestBid: Number(orderbook?.bids?.[0]?.price || 0) || null,
+        bestAsk: Number(orderbook?.asks?.[0]?.price || 0) || null,
+        fallbackPrice: null,
+        finalOrderType: config.trading.noAsksFallbackOrderType,
+        skipReason: reason,
+      });
       throw new Error(`SKIP:${reason}`);
     }
 
@@ -1256,11 +1560,29 @@ export class TradeExecutor {
     console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
 
     if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const noAsksFallbackResult = await this.tryNoAsksBuyFallback(
+        originalTrade,
+        copyNotional,
+        orderbook,
+        orderOpts,
+        feeRateBps
+      );
+      if (noAsksFallbackResult) {
+        return noAsksFallbackResult;
+      }
       const makerFallbackResult = await this.tryMakerFallback(originalTrade, copyNotional, orderbook);
       if (makerFallbackResult) {
         return makerFallbackResult;
       }
       const reason = originalTrade.side === 'BUY' ? 'no_asks_in_orderbook' : 'no_bids_in_orderbook';
+      console.log('[NoAsks Fallback]', {
+        fallbackUsed: false,
+        bestBid: Number(orderbook?.bids?.[0]?.price || 0) || null,
+        bestAsk: Number(orderbook?.asks?.[0]?.price || 0) || null,
+        fallbackPrice: null,
+        finalOrderType: config.trading.noAsksFallbackOrderType,
+        skipReason: reason,
+      });
       throw new Error(`SKIP:${reason}`);
     }
 

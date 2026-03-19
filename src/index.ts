@@ -61,6 +61,8 @@ class PolymarketCopyBot {
     console.log(`Dry run: ${config.trading.dryRun ? 'Enabled' : 'Disabled'}`);
     console.log(`Market scope: ${config.trading.marketScope}`);
     console.log(`WebSocket: ${config.monitoring.useWebSocket ? 'Enabled' : 'Disabled'}`);
+    console.log(`Prewarm match mode: ${config.monitoring.prewarmMatchMode}`);
+    console.log(`No-asks fallback: ${config.trading.enableNoAsksFallback ? 'Enabled' : 'Disabled'} (${config.trading.noAsksFallbackOrderType})`);
     if (config.risk.maxSessionNotional > 0 || config.risk.maxPerMarketNotional > 0) {
       console.log(`Risk caps: session=${config.risk.maxSessionNotional || '∞'} USDC, per-market=${config.risk.maxPerMarketNotional || '∞'} USDC`);
     }
