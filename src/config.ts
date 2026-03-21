@@ -97,6 +97,9 @@ export const config = {
     signalMakerTtlMs: parseNumber(process.env.SIGNAL_MAKER_TTL_MS, 5000),
     signalMakerPriceOffset: parseNumber(process.env.SIGNAL_MAKER_PRICE_OFFSET, 0.01),
     enableSignalMakerEntry: parseBoolean(process.env.ENABLE_SIGNAL_MAKER_ENTRY, true),
+    marketShortLockMs: parseNumber(process.env.MARKET_SHORT_LOCK_MS, 5000),
+    marketMaxRetryPerWindow: parseNumber(process.env.MARKET_MAX_RETRY_PER_WINDOW, 2),
+    marketRetryWindowMs: parseNumber(process.env.MARKET_RETRY_WINDOW_MS, 15000),
   },
 
   risk: {
@@ -170,6 +173,10 @@ export function validateConfig(): void {
     `(minReplicableBestBid=${config.trading.minReplicableBestBid}, maxSignalEntryBidGap=${config.trading.maxSignalEntryBidGap}, ` +
     `maxSignalMakerUsd=${config.trading.maxSignalMakerUsd}, signalMakerTtlMs=${config.trading.signalMakerTtlMs}, ` +
     `signalMakerPriceOffset=${config.trading.signalMakerPriceOffset})`
+  );
+  console.log(
+    `   Market lock: shortLockMs=${config.trading.marketShortLockMs}, maxRetryPerWindow=${config.trading.marketMaxRetryPerWindow}, ` +
+    `retryWindowMs=${config.trading.marketRetryWindowMs}`
   );
   console.log(`   Max source trade age: ${config.trading.maxSourceTradeAgeMs}ms`);
 }
