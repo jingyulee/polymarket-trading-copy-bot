@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { classifyCryptoMarket } from './crypto-market.js';
 
 export interface FilterTrade {
   timestamp?: number;
@@ -41,58 +42,7 @@ export interface FilterContext {
   marketLocks?: Set<string>;
 }
 
-const HIGH_LIQUIDITY_KEYWORDS = ['btc', 'bitcoin', 'eth', 'ethereum', 'sol', 'solana'];
-
-function textContainsCrypto(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return config.trading.cryptoKeywords.some((keyword) => normalized.includes(keyword));
-}
-
-function textContainsHighLiquiditySymbol(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return HIGH_LIQUIDITY_KEYWORDS.some((keyword) => normalized.includes(keyword));
-}
-
-function findMatchingKeyword(value: string | undefined, keywords: string[]): string | null {
-  const normalized = String(value || '').toLowerCase();
-  if (!normalized) return null;
-  return keywords.find((keyword) => normalized.includes(keyword.toLowerCase())) || null;
-}
-
-function getCryptoMarketMatch(trade: FilterTrade): {
-  matchedKeyword: string | null;
-  matchedField: 'slug' | 'title' | 'category' | 'tags' | null;
-} {
-  const keywords = config.trading.cryptoKeywords.map((keyword) => keyword.toLowerCase());
-
-  const slugMatch = findMatchingKeyword(trade.marketSlug, keywords);
-  if (slugMatch) {
-    return { matchedKeyword: slugMatch, matchedField: 'slug' };
-  }
-
-  const titleCandidates = [trade.title, trade.market, trade.question];
-  for (const candidate of titleCandidates) {
-    const titleMatch = findMatchingKeyword(candidate, keywords);
-    if (titleMatch) {
-      return { matchedKeyword: titleMatch, matchedField: 'title' };
-    }
-  }
-
-  const categoryMatch = findMatchingKeyword(trade.category, keywords);
-  if (categoryMatch) {
-    return { matchedKeyword: categoryMatch, matchedField: 'category' };
-  }
-
-  const tags = Array.isArray(trade.tags) ? trade.tags : typeof trade.tags === 'string' ? trade.tags.split(',') : [];
-  for (const tag of tags) {
-    const tagMatch = findMatchingKeyword(tag, keywords);
-    if (tagMatch) {
-      return { matchedKeyword: tagMatch, matchedField: 'tags' };
-    }
-  }
-
-  return { matchedKeyword: null, matchedField: null };
-}
+const HIGH_LIQUIDITY_SYMBOLS = new Set(['bitcoin', 'ethereum', 'solana']);
 
 export function getMarketLockKey(trade: FilterTrade): string {
   const outcome = String(trade.outcomeName || trade.outcome || '').trim().toUpperCase();
@@ -207,34 +157,39 @@ export function applyLightweightFilters(trade: FilterTrade, context: FilterConte
   }
 
   if (config.trading.marketScope === 'crypto-only') {
-    const marketTexts = [
-      trade.market,
-      trade.marketSlug,
-      trade.title,
-      trade.question,
-      trade.outcome,
-      trade.outcomeName,
-    ].filter(Boolean) as string[];
-
-    if (marketTexts.length === 0) {
-      return { pass: false, reason: 'market_metadata_missing' };
-    }
-
-    const cryptoMatch = getCryptoMarketMatch(trade);
-    const isCryptoMarket = Boolean(cryptoMatch.matchedKeyword) || marketTexts.some(textContainsCrypto);
-    console.log('[Market Scope]', {
+    const marketTitle = trade.title || trade.market || trade.question || null;
+    const marketClassification = classifyCryptoMarket({
+      marketTitle,
+      marketSlug: trade.marketSlug,
+      cryptoKeywords: config.trading.cryptoKeywords,
+    });
+    console.log('[Crypto Market Classification]', {
       marketTitle: trade.title || trade.market || trade.question || null,
       marketSlug: trade.marketSlug || null,
-      matchedKeyword: cryptoMatch.matchedKeyword,
-      matchedField: cryptoMatch.matchedField,
-      result: isCryptoMarket ? 'crypto' : 'non_crypto',
+      isCrypto: marketClassification.isCrypto,
+      matchedSymbol: marketClassification.matchedSymbol,
+      matchedKeyword: marketClassification.matchedKeyword,
+      matchedField: marketClassification.matchedField,
+      reason: marketClassification.reason,
     });
-    if (!isCryptoMarket) {
-      return { pass: false, reason: 'non_crypto_market' };
+    console.log('[Market Scope]', {
+      marketTitle,
+      marketSlug: trade.marketSlug || null,
+      matchedSymbol: marketClassification.matchedSymbol,
+      matchedKeyword: marketClassification.matchedKeyword,
+      matchedField: marketClassification.matchedField,
+      result: marketClassification.isCrypto ? 'crypto' : 'non_crypto',
+      reason: marketClassification.reason,
+    });
+    if (!marketClassification.isCrypto) {
+      return { pass: false, reason: marketClassification.reason === 'market_metadata_missing' ? 'market_metadata_missing' : 'non_crypto_market' };
     }
 
     if (config.trading.onlyHighLiquiditySymbols) {
-      const isHighLiquiditySymbol = marketTexts.some(textContainsHighLiquiditySymbol);
+      const isHighLiquiditySymbol = Boolean(
+        marketClassification.matchedSymbol &&
+        HIGH_LIQUIDITY_SYMBOLS.has(marketClassification.matchedSymbol)
+      );
       if (!isHighLiquiditySymbol) {
         return { pass: false, reason: 'not_high_liquidity_symbol', details };
       }

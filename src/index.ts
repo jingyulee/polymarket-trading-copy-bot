@@ -2,10 +2,11 @@ import { config, envPath, validateConfig } from './config.js';
 import { TradeMonitor } from './monitor.js';
 import { WebSocketMonitor } from './websocket-monitor.js';
 import type { Trade } from './monitor.js';
-import { TradeExecutor } from './trader.js';
+import { TradeExecutor, type SignalMakerExecutionResult } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
 import { applyFilters, applyLightweightFilters, getMarketLockKey } from './filter.js';
+import { classifyCryptoMarket } from './crypto-market.js';
 import {
   getSkipStatsByWindow,
   getSessionStats,
@@ -39,6 +40,7 @@ interface SignalMakerEntryDecision {
   tokenId: string;
   candidatePrice: number | null;
   candidateSizeUsd: number;
+  marketLocked: boolean;
   reason: string;
 }
 
@@ -60,16 +62,6 @@ class PolymarketCopyBot {
     tradesSkipped: 0,
     totalVolume: 0,
   };
-  private readonly fallbackLiquiditySymbols: Array<{ symbol: string; aliases: string[] }> = [
-    { symbol: 'bitcoin', aliases: ['bitcoin', 'btc'] },
-    { symbol: 'ethereum', aliases: ['ethereum', 'eth'] },
-    { symbol: 'solana', aliases: ['solana', 'sol'] },
-    { symbol: 'xrp', aliases: ['xrp'] },
-    { symbol: 'dogecoin', aliases: ['dogecoin', 'doge'] },
-    { symbol: 'bnb', aliases: ['bnb'] },
-    { symbol: 'hyperliquid', aliases: ['hyperliquid', 'hype'] },
-  ];
-
   constructor() {
     this.monitor = new TradeMonitor();
     this.executor = new TradeExecutor();
@@ -184,33 +176,31 @@ class PolymarketCopyBot {
     }
   }
 
-  private matchLiquiditySymbol(trade: Trade): string | null {
-    const texts = [
-      trade.title,
-      trade.market,
-      trade.question,
-      trade.marketSlug,
-      trade.outcome,
-      trade.outcomeName,
-    ]
-      .filter(Boolean)
-      .map((value) => String(value).toLowerCase());
-
-    for (const entry of this.fallbackLiquiditySymbols) {
-      if (entry.aliases.some((alias) => texts.some((text) => text.includes(alias)))) {
-        return entry.symbol;
-      }
-    }
-    return null;
-  }
-
   private getLiquiditySymbolCheck(trade: Trade): { matchedSymbol: string | null; allowed: boolean } {
-    const matchedSymbol = this.matchLiquiditySymbol(trade);
-    const allowed = Boolean(matchedSymbol);
+    const classification = classifyCryptoMarket({
+      marketTitle: trade.title || trade.market || trade.question || null,
+      marketSlug: trade.marketSlug || null,
+      cryptoKeywords: config.trading.cryptoKeywords,
+    });
+    const matchedSymbol = classification.matchedSymbol;
+    const allowed = classification.isCrypto;
+    console.log('[Crypto Market Classification]', {
+      marketTitle: trade.title || trade.market || trade.question || null,
+      marketSlug: trade.marketSlug || null,
+      isCrypto: classification.isCrypto,
+      matchedSymbol: classification.matchedSymbol,
+      matchedKeyword: classification.matchedKeyword,
+      matchedField: classification.matchedField,
+      reason: classification.reason,
+    });
     console.log('[Liquidity Symbol Check]', {
       marketTitle: trade.title || trade.market || trade.question || null,
       marketSlug: trade.marketSlug || null,
+      isCrypto: classification.isCrypto,
       matchedSymbol,
+      matchedKeyword: classification.matchedKeyword,
+      matchedField: classification.matchedField,
+      reason: classification.reason,
       allowed,
     });
     return { matchedSymbol, allowed };
@@ -286,19 +276,24 @@ class PolymarketCopyBot {
     bestBid: number | null;
     asksDepth: number;
     copyNotional: number;
+    marketLocked: boolean;
   }): Promise<SignalMakerEntryDecision> {
-    const { trade, signalConfirmation, bestBid, asksDepth, copyNotional } = params;
+    const { trade, signalConfirmation, bestBid, asksDepth, copyNotional, marketLocked } = params;
     const baseDecision: SignalMakerEntryDecision = {
       enabled: false,
       side: trade.side === 'SELL' ? 'SELL' : 'BUY',
       tokenId: trade.tokenId,
       candidatePrice: null,
-      candidateSizeUsd: copyNotional,
+      candidateSizeUsd: Math.min(copyNotional, config.trading.maxSignalMakerUsd),
+      marketLocked,
       reason: 'signal_not_confirmed',
     };
 
     if (!signalConfirmation) {
       return baseDecision;
+    }
+    if (!config.trading.enableSignalMakerEntry) {
+      return { ...baseDecision, reason: 'signal_maker_entry_disabled' };
     }
 
     if (trade.side !== 'BUY') {
@@ -316,6 +311,9 @@ class PolymarketCopyBot {
     if (bestBid == null) {
       return { ...baseDecision, reason: 'best_bid_missing' };
     }
+    if (marketLocked) {
+      return { ...baseDecision, reason: 'market_locked' };
+    }
     if (bestBid < config.trading.minReplicableBestBid) {
       return { ...baseDecision, reason: 'best_bid_too_low' };
     }
@@ -324,7 +322,12 @@ class PolymarketCopyBot {
     }
 
     const candidatePrice = await this.executor.getValidatedPriceForDecision(
-      Math.min(trade.price, 0.99),
+      Math.min(
+        trade.price,
+        bestBid + config.trading.signalMakerPriceOffset,
+        config.trading.maxSourcePrice,
+        0.99
+      ),
       trade.tokenId
     );
 
@@ -333,9 +336,58 @@ class PolymarketCopyBot {
       side: 'BUY',
       tokenId: trade.tokenId,
       candidatePrice,
-      candidateSizeUsd: copyNotional,
+      candidateSizeUsd: baseDecision.candidateSizeUsd,
+      marketLocked,
       reason: 'signal_confirmed_no_asks_maker_candidate',
     };
+  }
+
+  private handleSuccessfulExecution(
+    trade: Trade,
+    result: { orderId: string; copyNotional: number; copyShares: number; price: number; side: 'BUY' | 'SELL'; tokenId: string },
+    sourceAgeMs: number,
+    marketLockKey: string,
+    reason: string,
+    persistMarketLockOnSuccess: boolean
+  ): void {
+    this.risk.recordFill({
+      trade,
+      notional: result.copyNotional,
+      shares: result.copyShares,
+      price: result.price,
+      side: result.side,
+    });
+    this.stats.tradesCopied++;
+    this.stats.totalVolume += result.copyNotional;
+    if (persistMarketLockOnSuccess && config.trading.oneTradePerMarket) {
+      this.marketLocks.add(marketLockKey);
+      persistMarketLock(marketLockKey, trade.timestamp || Date.now());
+    }
+    this.recordTradeLog(trade, {
+      action: 'copy_success',
+      reason,
+      orderId: result.orderId,
+      fillPrice: result.price,
+      fillSize: result.copyShares,
+      copyNotional: result.copyNotional,
+      sourceAgeMs,
+    });
+    insertLivePosition({
+      conditionId: trade.conditionId,
+      market: trade.market,
+      marketSlug: trade.marketSlug,
+      tokenId: trade.tokenId,
+      outcome: trade.outcome,
+      side: trade.side,
+      entryTs: trade.timestamp || Date.now(),
+      entryPrice: result.price,
+      entryShares: result.copyShares,
+      entryNotional: result.copyNotional,
+      sourcePrice: trade.price,
+      sourceSizeUsd: trade.size,
+      orderId: result.orderId,
+      status: 'open',
+    });
   }
 
   private async handleNewTrade(trade: Trade): Promise<void> {
@@ -551,12 +603,14 @@ class PolymarketCopyBot {
     }
 
     const copyNotional = this.executor.calculateCopySize(effectiveTrade.size);
+    const marketLocked = config.trading.oneTradePerMarket && this.marketLocks.has(marketLockKey);
     const signalMakerDecision = await this.shouldPlaceSignalMakerEntry({
       trade: effectiveTrade,
       signalConfirmation,
       bestBid,
       asksDepth,
       copyNotional,
+      marketLocked,
     });
     if (signalMakerDecision.enabled) {
       console.log('[Signal Maker Entry Candidate]', {
@@ -580,17 +634,65 @@ class PolymarketCopyBot {
         reason: signalMakerDecision.reason,
       });
     }
-    const riskCheck = this.risk.checkTrade(effectiveTrade, copyNotional);
+    const riskTargetNotional = signalMakerDecision.enabled ? signalMakerDecision.candidateSizeUsd : copyNotional;
+    const riskCheck = this.risk.checkTrade(effectiveTrade, riskTargetNotional);
     if (!riskCheck.allowed) {
       this.recordTradeLog(trade, {
         action: 'skip',
         reason: riskCheck.reason || 'risk_check_blocked',
         sourceAgeMs,
-        copyNotional,
+        copyNotional: riskTargetNotional,
       });
       console.log(`⚠️  Risk check blocked trade: ${riskCheck.reason}`);
       this.printStats();
       return;
+    }
+
+    if (signalMakerDecision.enabled && !config.trading.dryRun && signalMakerDecision.candidatePrice != null) {
+      try {
+        const makerResult: SignalMakerExecutionResult = await this.executor.executeSignalMakerEntry(effectiveTrade, {
+          candidatePrice: signalMakerDecision.candidatePrice,
+          candidateNotional: signalMakerDecision.candidateSizeUsd,
+          reason: signalMakerDecision.reason,
+        });
+
+        if (makerResult.filledNotional > 0) {
+          this.handleSuccessfulExecution(trade, {
+            orderId: makerResult.orderId,
+            copyNotional: makerResult.filledNotional,
+            copyShares: makerResult.filledSize,
+            price: makerResult.price,
+            side: makerResult.side,
+            tokenId: makerResult.tokenId,
+          }, sourceAgeMs, marketLockKey, makerResult.reason, true);
+          console.log('✅ Signal maker entry executed');
+          await sendTelegram(formatTradeMessage(trade, {
+            mode: 'LIVE',
+            decision: 'ORDER_PLACED',
+            copyNotional: makerResult.filledNotional,
+            fillPrice: makerResult.price,
+            fillSize: makerResult.filledSize,
+            sourceAgeMs,
+          }));
+        } else {
+          this.stats.tradesSkipped++;
+          console.log(`⏭️  Signal maker entry ended without fill: ${makerResult.reason}`);
+        }
+        this.printStats();
+        return;
+      } catch (error: any) {
+        const reason = error?.message || 'signal_maker_entry_failed';
+        this.stats.tradesFailed++;
+        this.recordTradeLog(trade, {
+          action: 'copy_fail',
+          reason,
+          sourceAgeMs,
+          copyNotional: signalMakerDecision.candidateSizeUsd,
+        });
+        console.log(`❌ Signal maker entry failed: ${reason}`);
+        this.printStats();
+        return;
+      }
     }
 
     if (config.trading.oneTradePerMarket) {
@@ -640,40 +742,7 @@ class PolymarketCopyBot {
 
     try {
       const result = await this.executor.executeCopyTrade(effectiveTrade, copyNotional);
-      this.risk.recordFill({
-        trade,
-        notional: result.copyNotional,
-        shares: result.copyShares,
-        price: result.price,
-        side: result.side,
-      });
-      this.stats.tradesCopied++;
-      this.stats.totalVolume += result.copyNotional;
-      this.recordTradeLog(trade, {
-        action: 'copy_success',
-        reason: 'executed',
-        orderId: result.orderId,
-        fillPrice: result.price,
-        fillSize: result.copyShares,
-        copyNotional: result.copyNotional,
-        sourceAgeMs,
-      });
-      insertLivePosition({
-        conditionId: trade.conditionId,
-        market: trade.market,
-        marketSlug: trade.marketSlug,
-        tokenId: trade.tokenId,
-        outcome: trade.outcome,
-        side: trade.side,
-        entryTs: trade.timestamp || Date.now(),
-        entryPrice: result.price,
-        entryShares: result.copyShares,
-        entryNotional: result.copyNotional,
-        sourcePrice: trade.price,
-        sourceSizeUsd: trade.size,
-        orderId: result.orderId,
-        status: 'open',
-      });
+      this.handleSuccessfulExecution(trade, result, sourceAgeMs, marketLockKey, 'executed', false);
       console.log('✅ Successfully copied trade');
       await sendTelegram(formatTradeMessage(trade, {
         mode: 'LIVE',

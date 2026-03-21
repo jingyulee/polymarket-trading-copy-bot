@@ -85,6 +85,16 @@ export interface CopyExecutionResult {
   tokenId: string;
 }
 
+export interface SignalMakerExecutionResult extends CopyExecutionResult {
+  candidatePrice: number;
+  candidateNotional: number;
+  finalStatus: 'FILLED' | 'PARTIALLY_FILLED' | 'CANCELLED';
+  filledSize: number;
+  filledNotional: number;
+  cancelled: boolean;
+  reason: string;
+}
+
 export class TradeExecutor {
   private wallet: ethers.Wallet;
   private provider: ethers.providers.JsonRpcProvider;
@@ -1433,6 +1443,272 @@ export class TradeExecutor {
       fillSize: params.fillSize,
       copyNotional: params.copyNotional,
     });
+  }
+
+  private logSignalMakerEntryEvent(
+    trade: Trade,
+    params: {
+      action:
+        | 'signal_maker_entry_submitted'
+        | 'signal_maker_entry_filled'
+        | 'signal_maker_entry_partially_filled'
+        | 'signal_maker_entry_cancelled'
+        | 'signal_maker_entry_failed';
+      reason: string;
+      orderId?: string;
+      fillPrice?: number;
+      fillSize?: number;
+      copyNotional?: number;
+    }
+  ): void {
+    logTrade({
+      ts: Date.now(),
+      market: trade.market,
+      marketSlug: trade.marketSlug,
+      tokenId: trade.tokenId,
+      side: trade.side,
+      sourcePrice: trade.price,
+      sourceSizeUsd: trade.size,
+      sourceAgeMs: trade.timestamp ? Math.max(0, Date.now() - trade.timestamp) : undefined,
+      action: params.action,
+      reason: params.reason,
+      orderId: params.orderId,
+      fillPrice: params.fillPrice,
+      fillSize: params.fillSize,
+      copyNotional: params.copyNotional,
+    });
+  }
+
+  async executeSignalMakerEntry(
+    originalTrade: Trade,
+    params: {
+      candidatePrice: number;
+      candidateNotional: number;
+      reason: string;
+    }
+  ): Promise<SignalMakerExecutionResult> {
+    const validatedPrice = await this.validatePrice(params.candidatePrice, originalTrade.tokenId);
+    const copyShares = this.calculateSharesFromNotional(params.candidateNotional, validatedPrice);
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
+
+    console.log('[Signal Maker Entry Submitted]', {
+      tokenId: originalTrade.tokenId,
+      market: originalTrade.market,
+      side: originalTrade.side,
+      candidatePrice: validatedPrice,
+      candidateNotional: params.candidateNotional,
+      candidateSizeUsd: params.candidateNotional,
+      reason: params.reason,
+    });
+
+    let response: any;
+    try {
+      response = await this.clobClient.createAndPostOrder(
+        {
+          tokenID: originalTrade.tokenId,
+          price: validatedPrice,
+          size: copyShares,
+          side: originalTrade.side as Side,
+          feeRateBps,
+        },
+        orderOpts,
+        OrderType.GTC,
+        false,
+        true
+      );
+    } catch (error: any) {
+      console.log('[Signal Maker Entry Failed]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        side: originalTrade.side,
+        candidatePrice: validatedPrice,
+        candidateNotional: params.candidateNotional,
+        reason: error?.message || 'Unknown error',
+      });
+      this.logSignalMakerEntryEvent(originalTrade, {
+        action: 'signal_maker_entry_failed',
+        reason: error?.message || 'signal_maker_submit_failed',
+        fillPrice: validatedPrice,
+        fillSize: copyShares,
+        copyNotional: params.candidateNotional,
+      });
+      throw error;
+    }
+
+    if (!response.success) {
+      const errorMsg = response.errorMsg || response.error || 'Unknown error';
+      console.log('[Signal Maker Entry Failed]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        side: originalTrade.side,
+        candidatePrice: validatedPrice,
+        candidateNotional: params.candidateNotional,
+        reason: errorMsg,
+      });
+      this.logSignalMakerEntryEvent(originalTrade, {
+        action: 'signal_maker_entry_failed',
+        reason: errorMsg,
+        fillPrice: validatedPrice,
+        fillSize: copyShares,
+        copyNotional: params.candidateNotional,
+      });
+      throw new Error(`Order placement failed: ${errorMsg}`);
+    }
+
+    const orderId = response.orderID;
+    this.logSignalMakerEntryEvent(originalTrade, {
+      action: 'signal_maker_entry_submitted',
+      reason: params.reason,
+      orderId,
+      fillPrice: validatedPrice,
+      fillSize: copyShares,
+      copyNotional: params.candidateNotional,
+    });
+
+    const deadline = Date.now() + Math.max(1000, config.trading.signalMakerTtlMs);
+    let lastMatched = 0;
+    let lastOrderStatus = '';
+    let resolvedPrice = validatedPrice;
+
+    while (Date.now() < deadline) {
+      await this.sleep(Math.min(1000, Math.max(100, deadline - Date.now())));
+      try {
+        const order = await this.clobClient.getOrder(orderId);
+        const matched = parseFloat(order?.size_matched || '0');
+        const originalSize = parseFloat(order?.original_size || copyShares.toString());
+        const status = String(order?.status || '').toUpperCase();
+        const price = parseFloat(order?.price || validatedPrice.toString());
+
+        lastMatched = Number.isFinite(matched) ? matched : lastMatched;
+        lastOrderStatus = status;
+        resolvedPrice = Number.isFinite(price) ? price : resolvedPrice;
+
+        if (lastMatched > 0 && (lastMatched >= originalSize - 0.0001 || ['FILLED', 'MATCHED', 'COMPLETED'].includes(status))) {
+          const filledNotional = lastMatched * resolvedPrice;
+          console.log('[Signal Maker Entry Filled]', {
+            tokenId: originalTrade.tokenId,
+            market: originalTrade.market,
+            side: originalTrade.side,
+            candidatePrice: validatedPrice,
+            candidateNotional: params.candidateNotional,
+            orderId,
+            finalStatus: status || 'FILLED',
+            filledSize: lastMatched,
+            filledNotional,
+            cancelled: false,
+            reason: 'signal_maker_filled',
+          });
+          this.logSignalMakerEntryEvent(originalTrade, {
+            action: 'signal_maker_entry_filled',
+            reason: 'signal_maker_filled',
+            orderId,
+            fillPrice: resolvedPrice,
+            fillSize: lastMatched,
+            copyNotional: filledNotional,
+          });
+          return {
+            orderId,
+            copyNotional: filledNotional,
+            copyShares: lastMatched,
+            price: resolvedPrice,
+            side: originalTrade.side,
+            tokenId: originalTrade.tokenId,
+            candidatePrice: validatedPrice,
+            candidateNotional: params.candidateNotional,
+            finalStatus: 'FILLED',
+            filledSize: lastMatched,
+            filledNotional,
+            cancelled: false,
+            reason: 'signal_maker_filled',
+          };
+        }
+      } catch (error: any) {
+        console.log(`   Signal maker entry poll failed: ${error?.message || 'Unknown error'}`);
+      }
+    }
+
+    try {
+      await this.clobClient.cancelOrder({ orderID: orderId });
+    } catch (error: any) {
+      console.log(`   Signal maker entry cancel failed: ${error?.message || 'Unknown error'}`);
+    }
+
+    if (lastMatched > 0) {
+      const filledNotional = lastMatched * resolvedPrice;
+      console.log('[Signal Maker Entry Partially Filled]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        side: originalTrade.side,
+        candidatePrice: validatedPrice,
+        candidateNotional: params.candidateNotional,
+        orderId,
+        finalStatus: lastOrderStatus || 'PARTIALLY_FILLED',
+        filledSize: lastMatched,
+        filledNotional,
+        cancelled: true,
+        reason: 'signal_maker_partial_fill_cancelled',
+      });
+      this.logSignalMakerEntryEvent(originalTrade, {
+        action: 'signal_maker_entry_partially_filled',
+        reason: 'signal_maker_partial_fill_cancelled',
+        orderId,
+        fillPrice: resolvedPrice,
+        fillSize: lastMatched,
+        copyNotional: filledNotional,
+      });
+      return {
+        orderId,
+        copyNotional: filledNotional,
+        copyShares: lastMatched,
+        price: resolvedPrice,
+        side: originalTrade.side,
+        tokenId: originalTrade.tokenId,
+        candidatePrice: validatedPrice,
+        candidateNotional: params.candidateNotional,
+        finalStatus: 'PARTIALLY_FILLED',
+        filledSize: lastMatched,
+        filledNotional,
+        cancelled: true,
+        reason: 'signal_maker_partial_fill_cancelled',
+      };
+    }
+
+    console.log('[Signal Maker Entry Cancelled]', {
+      tokenId: originalTrade.tokenId,
+      market: originalTrade.market,
+      side: originalTrade.side,
+      candidatePrice: validatedPrice,
+      candidateNotional: params.candidateNotional,
+      orderId,
+      finalStatus: lastOrderStatus || 'CANCELLED',
+      filledSize: 0,
+      filledNotional: 0,
+      cancelled: true,
+      reason: 'signal_maker_timeout_cancelled',
+    });
+    this.logSignalMakerEntryEvent(originalTrade, {
+      action: 'signal_maker_entry_cancelled',
+      reason: 'signal_maker_timeout_cancelled',
+      orderId,
+      fillPrice: resolvedPrice,
+      copyNotional: params.candidateNotional,
+    });
+    return {
+      orderId,
+      copyNotional: 0,
+      copyShares: 0,
+      price: resolvedPrice,
+      side: originalTrade.side,
+      tokenId: originalTrade.tokenId,
+      candidatePrice: validatedPrice,
+      candidateNotional: params.candidateNotional,
+      finalStatus: 'CANCELLED',
+      filledSize: 0,
+      filledNotional: 0,
+      cancelled: true,
+      reason: 'signal_maker_timeout_cancelled',
+    };
   }
 
   private async tryMakerFallback(

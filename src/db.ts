@@ -10,7 +10,12 @@ export type TradeLogAction =
   | 'copy_fail'
   | 'maker_fallback_placed'
   | 'maker_fallback_filled'
-  | 'maker_fallback_cancelled';
+  | 'maker_fallback_cancelled'
+  | 'signal_maker_entry_submitted'
+  | 'signal_maker_entry_filled'
+  | 'signal_maker_entry_partially_filled'
+  | 'signal_maker_entry_cancelled'
+  | 'signal_maker_entry_failed';
 
 export interface TradeLogEntry {
   ts?: number;

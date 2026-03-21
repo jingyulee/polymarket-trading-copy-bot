@@ -93,6 +93,10 @@ export const config = {
     maxFallbackPriceGapBps: parseNumber(process.env.MAX_FALLBACK_PRICE_GAP_BPS, 300),
     minReplicableBestBid: parseNumber(process.env.MIN_REPLICABLE_BEST_BID, 0.80),
     maxSignalEntryBidGap: parseNumber(process.env.MAX_SIGNAL_ENTRY_BID_GAP, 0.05),
+    maxSignalMakerUsd: parseNumber(process.env.MAX_SIGNAL_MAKER_USD, 1),
+    signalMakerTtlMs: parseNumber(process.env.SIGNAL_MAKER_TTL_MS, 5000),
+    signalMakerPriceOffset: parseNumber(process.env.SIGNAL_MAKER_PRICE_OFFSET, 0.01),
+    enableSignalMakerEntry: parseBoolean(process.env.ENABLE_SIGNAL_MAKER_ENTRY, true),
   },
 
   risk: {
@@ -160,6 +164,12 @@ export function validateConfig(): void {
   console.log(
     `   No-asks fallback: ${config.trading.enableNoAsksFallback ? 'enabled' : 'disabled'} ` +
     `(orderType=${config.trading.noAsksFallbackOrderType}, maxGap=${config.trading.maxFallbackPriceGapBps}bps)`
+  );
+  console.log(
+    `   Signal maker entry: ${config.trading.enableSignalMakerEntry ? 'enabled' : 'disabled'} ` +
+    `(minReplicableBestBid=${config.trading.minReplicableBestBid}, maxSignalEntryBidGap=${config.trading.maxSignalEntryBidGap}, ` +
+    `maxSignalMakerUsd=${config.trading.maxSignalMakerUsd}, signalMakerTtlMs=${config.trading.signalMakerTtlMs}, ` +
+    `signalMakerPriceOffset=${config.trading.signalMakerPriceOffset})`
   );
   console.log(`   Max source trade age: ${config.trading.maxSourceTradeAgeMs}ms`);
 }
