@@ -23,6 +23,7 @@ import { startTelegramCommandWatcher } from './telegram-commands.js';
 import { formatTradeMessage } from './telegram-trade-formatter.js';
 import { startRedeemWatcher } from './redeem-watcher.js';
 import { startSettlementUpdater } from './settlement-updater.js';
+import { captureSignal, deleteSignal, getSignal, getSignalKey, SIGNAL_TTL_MS } from './signal-cache.js';
 
 class PolymarketCopyBot {
   private monitor: TradeMonitor;
@@ -225,6 +226,43 @@ class PolymarketCopyBot {
     return shouldBypass;
   }
 
+  private shouldCaptureSmallTradeSignal(trade: Trade, sourcePrice: number, sourceAgeMs: number): boolean {
+    if (config.trading.copyOnlyBuy && trade.side !== 'BUY') {
+      return false;
+    }
+    if (!Number.isFinite(sourcePrice)) {
+      return false;
+    }
+    if (sourcePrice < config.trading.minSourcePrice || sourcePrice > config.trading.maxSourcePrice) {
+      return false;
+    }
+    if (sourceAgeMs > config.trading.maxSourceTradeAgeMs) {
+      return false;
+    }
+    return true;
+  }
+
+  private getSignalBoostPrice(trade: Trade, signalPrice: number): number | null {
+    const sourcePrice = Number(trade.price);
+    if (!Number.isFinite(sourcePrice) || !Number.isFinite(signalPrice)) {
+      return null;
+    }
+
+    const slippageCap = signalPrice * (1 + config.trading.slippageTolerance);
+    const boostedPrice = Math.min(
+      sourcePrice,
+      signalPrice + 0.01,
+      slippageCap,
+      config.trading.maxSourcePrice
+    );
+
+    if (!Number.isFinite(boostedPrice)) {
+      return null;
+    }
+
+    return Math.round(boostedPrice * 10000) / 10000;
+  }
+
   private async handleNewTrade(trade: Trade): Promise<void> {
     if (trade.outcome === 'UNKNOWN') {
       const mappedOutcome = await this.executor.getOutcomeLabel(trade.tokenId);
@@ -248,8 +286,12 @@ class PolymarketCopyBot {
     this.pruneProcessedTrades();
     this.stats.tradesDetected++;
 
-    const sourceAgeMs = Math.max(0, Date.now() - (trade.timestamp || Date.now()));
+    const now = Date.now();
+    const sourceAgeMs = Math.max(0, now - (trade.timestamp || now));
+    const sourcePrice = Number(trade.price);
+    const sourceSizeUsd = Number(trade.size);
     const marketLockKey = getMarketLockKey(trade);
+    const signalKey = getSignalKey(trade);
 
     console.log('\n' + '='.repeat(50));
     console.log('🎯 NEW TRADE DETECTED');
@@ -261,9 +303,84 @@ class PolymarketCopyBot {
     console.log(`   Age: ${sourceAgeMs}ms`);
     console.log('='.repeat(50));
 
+    if (Number.isFinite(sourceSizeUsd) && sourceSizeUsd < config.trading.minSourceTradeUsd) {
+      if (this.shouldCaptureSmallTradeSignal(trade, sourcePrice, sourceAgeMs)) {
+        captureSignal(signalKey, {
+          price: sourcePrice,
+          ts: now,
+          sourceSize: sourceSizeUsd,
+        }, now);
+        console.log('[Signal Captured]', {
+          key: signalKey,
+          market: trade.market,
+          side: trade.side,
+          sourcePrice,
+          sourceSizeUsd,
+          ttlMs: SIGNAL_TTL_MS,
+        });
+        return;
+      }
+    }
+
+    let effectiveTrade = trade;
+    const signalLookup = getSignal(signalKey, now);
+    if (signalLookup.expired) {
+      console.log('[Signal Expired]', {
+        key: signalKey,
+        market: trade.market,
+        side: trade.side,
+        ttlMs: SIGNAL_TTL_MS,
+      });
+    }
+    const signal = signalLookup.signal;
+    if (signal) {
+      const signalAgeMs = now - signal.ts;
+      if (sourcePrice < 0.95) {
+        console.log('[Signal Ignored]', {
+          key: signalKey,
+          market: trade.market,
+          side: trade.side,
+          reason: 'source_price_below_0_95',
+          sourcePrice,
+          signalPrice: signal.price,
+          ageMs: signalAgeMs,
+        });
+      } else {
+        const boostedPrice = this.getSignalBoostPrice(trade, signal.price);
+        if (boostedPrice == null || boostedPrice < config.trading.minSourcePrice) {
+          console.log('[Signal Ignored]', {
+            key: signalKey,
+            market: trade.market,
+            side: trade.side,
+            reason: 'boosted_price_out_of_range',
+            sourcePrice,
+            signalPrice: signal.price,
+            boostedPrice,
+            ageMs: signalAgeMs,
+          });
+        } else {
+          effectiveTrade = {
+            ...trade,
+            price: boostedPrice,
+          };
+          deleteSignal(signalKey);
+          console.log('[Signal Confirmed]', {
+            key: signalKey,
+            market: trade.market,
+            side: trade.side,
+            ageMs: signalAgeMs,
+            signalPrice: signal.price,
+            confirmationPrice: sourcePrice,
+            entryPrice: boostedPrice,
+            signalSourceSize: signal.sourceSize,
+          });
+        }
+      }
+    }
+
     const liquiditySymbolCheck = this.getLiquiditySymbolCheck(trade);
-    const lightweightFilterResult = applyLightweightFilters(trade, {
-      now: Date.now(),
+    const lightweightFilterResult = applyLightweightFilters(effectiveTrade, {
+      now,
     });
 
     const bypassLiquidityGate = lightweightFilterResult.reason === 'not_high_liquidity_symbol' && liquiditySymbolCheck.allowed;
@@ -299,7 +416,7 @@ class PolymarketCopyBot {
       : undefined;
 
     const filterResult = applyFilters(trade, {
-      now: Date.now(),
+      now,
       bestBid: bestBid ?? undefined,
       bestAsk: bestAsk ?? undefined,
       bestAskLiquidityUsd,
@@ -308,16 +425,28 @@ class PolymarketCopyBot {
       asksDepth,
       marketLocks: this.marketLocks,
     });
+    const effectiveFilterResult = effectiveTrade === trade
+      ? filterResult
+      : applyFilters(effectiveTrade, {
+        now,
+        bestBid: bestBid ?? undefined,
+        bestAsk: bestAsk ?? undefined,
+        bestAskLiquidityUsd,
+        spread: spread ?? undefined,
+        bidsDepth,
+        asksDepth,
+        marketLocks: this.marketLocks,
+      });
 
-    const bypassNoAsksFilter = filterResult.reason === 'no_asks_in_orderbook' && this.shouldBypassNoAsksFilter(trade, {
+    const bypassNoAsksFilter = effectiveFilterResult.reason === 'no_asks_in_orderbook' && this.shouldBypassNoAsksFilter(effectiveTrade, {
       bestBid,
       bidsDepth,
       asksDepth,
     });
-    const noLiquidityBothSides = filterResult.reason === 'no_asks_in_orderbook' && asksDepth === 0 && (bestBid == null || bidsDepth === 0);
+    const noLiquidityBothSides = effectiveFilterResult.reason === 'no_asks_in_orderbook' && asksDepth === 0 && (bestBid == null || bidsDepth === 0);
 
-    if (!filterResult.pass && !bypassNoAsksFilter) {
-      const resolvedReason = noLiquidityBothSides ? 'no_liquidity_both_sides' : filterResult.reason;
+    if (!effectiveFilterResult.pass && !bypassNoAsksFilter) {
+      const resolvedReason = noLiquidityBothSides ? 'no_liquidity_both_sides' : effectiveFilterResult.reason;
       this.recordTradeLog(trade, {
         action: 'skip',
         reason: resolvedReason,
@@ -338,8 +467,8 @@ class PolymarketCopyBot {
       console.log('ℹ️  Bypassing no_asks_in_orderbook filter so fallback execution can handle the trade');
     }
 
-    const copyNotional = this.executor.calculateCopySize(trade.size);
-    const riskCheck = this.risk.checkTrade(trade, copyNotional);
+    const copyNotional = this.executor.calculateCopySize(effectiveTrade.size);
+    const riskCheck = this.risk.checkTrade(effectiveTrade, copyNotional);
     if (!riskCheck.allowed) {
       this.recordTradeLog(trade, {
         action: 'skip',
@@ -358,7 +487,7 @@ class PolymarketCopyBot {
     }
 
     if (config.trading.dryRun) {
-      const entryPrice = Number.isFinite(bestAsk) ? bestAsk : trade.price;
+      const entryPrice = Number.isFinite(bestAsk) ? bestAsk : effectiveTrade.price;
       const entryShares = this.executor.calculateSharesFromNotional(copyNotional, entryPrice);
       this.recordTradeLog(trade, {
         action: 'dry_run',
@@ -398,7 +527,7 @@ class PolymarketCopyBot {
     }
 
     try {
-      const result = await this.executor.executeCopyTrade(trade, copyNotional);
+      const result = await this.executor.executeCopyTrade(effectiveTrade, copyNotional);
       this.risk.recordFill({
         trade,
         notional: result.copyNotional,
