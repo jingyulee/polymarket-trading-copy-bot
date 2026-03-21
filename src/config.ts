@@ -91,6 +91,8 @@ export const config = {
     enableNoAsksFallback: parseBoolean(process.env.ENABLE_NO_ASKS_FALLBACK, true),
     noAsksFallbackOrderType: parseImmediateOrderType(process.env.NO_ASKS_FALLBACK_ORDER_TYPE, 'FAK'),
     maxFallbackPriceGapBps: parseNumber(process.env.MAX_FALLBACK_PRICE_GAP_BPS, 300),
+    minReplicableBestBid: parseNumber(process.env.MIN_REPLICABLE_BEST_BID, 0.80),
+    maxSignalEntryBidGap: parseNumber(process.env.MAX_SIGNAL_ENTRY_BID_GAP, 0.05),
   },
 
   risk: {

@@ -70,6 +70,12 @@ interface NoAsksFallbackPlan {
   bestAsk: number | null;
 }
 
+interface UnreplicableNoAskMarketResult {
+  unreplicable: boolean;
+  bestBid: number | null;
+  asksDepth: number;
+}
+
 export interface CopyExecutionResult {
   orderId: string;
   copyNotional: number;
@@ -977,6 +983,10 @@ export class TradeExecutor {
     return Math.round(price / tickSize) * tickSize;
   }
 
+  async getValidatedPriceForDecision(price: number, tokenId: string): Promise<number> {
+    return this.validatePrice(price, tokenId);
+  }
+
   async validatePrice(price: number, tokenId: string): Promise<number> {
     const tickSize = await this.getTickSize(tokenId);
     const roundedPrice = this.roundToTickSize(price, tickSize);
@@ -1193,6 +1203,18 @@ export class TradeExecutor {
 
     console.log('[NoAsks Fallback]', plan);
     return plan;
+  }
+
+  private isUnreplicableNoAskMarket(orderbook: any, sourcePrice: number): UnreplicableNoAskMarketResult {
+    const asksDepth = Array.isArray(orderbook?.asks) ? orderbook.asks.length : 0;
+    const bestBidValue = Number(orderbook?.bids?.[0]?.price);
+    const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
+
+    return {
+      unreplicable: asksDepth === 0 && bestBid != null && bestBid <= 0.05 && sourcePrice >= 0.95,
+      bestBid,
+      asksDepth,
+    };
   }
 
   private async tryNoAsksBuyFallback(
@@ -1621,6 +1643,18 @@ export class TradeExecutor {
     console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
 
     if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const marketStructure = this.isUnreplicableNoAskMarket(orderbook, originalTrade.price);
+      if (marketStructure.unreplicable) {
+        console.log('[Unreplicable Market Structure]', {
+          tokenId: originalTrade.tokenId,
+          market: originalTrade.market,
+          bestBid: marketStructure.bestBid,
+          asksDepth: marketStructure.asksDepth,
+          sourcePrice: originalTrade.price,
+          reason: 'no_asks_and_extreme_bid_gap',
+        });
+        throw new Error('SKIP:unreplicable_market_structure');
+      }
       const noAsksFallbackResult = await this.tryNoAsksBuyFallback(
         originalTrade,
         copyNotional,
@@ -1722,6 +1756,18 @@ export class TradeExecutor {
     console.log(`   top 3 asks: ${JSON.stringify(orderbook.asks?.slice(0, 3) || [])}`);
 
     if (!this.ensureLiquidity(orderbook, originalTrade.side)) {
+      const marketStructure = this.isUnreplicableNoAskMarket(orderbook, originalTrade.price);
+      if (marketStructure.unreplicable) {
+        console.log('[Unreplicable Market Structure]', {
+          tokenId: originalTrade.tokenId,
+          market: originalTrade.market,
+          bestBid: marketStructure.bestBid,
+          asksDepth: marketStructure.asksDepth,
+          sourcePrice: originalTrade.price,
+          reason: 'no_asks_and_extreme_bid_gap',
+        });
+        throw new Error('SKIP:unreplicable_market_structure');
+      }
       const noAsksFallbackResult = await this.tryNoAsksBuyFallback(
         originalTrade,
         copyNotional,

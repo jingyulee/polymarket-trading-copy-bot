@@ -25,6 +25,23 @@ import { startRedeemWatcher } from './redeem-watcher.js';
 import { startSettlementUpdater } from './settlement-updater.js';
 import { captureSignal, deleteSignal, getSignal, getSignalKey, SIGNAL_TTL_MS } from './signal-cache.js';
 
+interface SignalConfirmationContext {
+  ageMs: number;
+  signalPrice: number;
+  confirmationPrice: number;
+  entryPrice: number;
+  signalSourceSize: number;
+}
+
+interface SignalMakerEntryDecision {
+  enabled: boolean;
+  side: 'BUY' | 'SELL';
+  tokenId: string;
+  candidatePrice: number | null;
+  candidateSizeUsd: number;
+  reason: string;
+}
+
 class PolymarketCopyBot {
   private monitor: TradeMonitor;
   private wsMonitor?: WebSocketMonitor;
@@ -263,6 +280,64 @@ class PolymarketCopyBot {
     return Math.round(boostedPrice * 10000) / 10000;
   }
 
+  private async shouldPlaceSignalMakerEntry(params: {
+    trade: Trade;
+    signalConfirmation: SignalConfirmationContext | null;
+    bestBid: number | null;
+    asksDepth: number;
+    copyNotional: number;
+  }): Promise<SignalMakerEntryDecision> {
+    const { trade, signalConfirmation, bestBid, asksDepth, copyNotional } = params;
+    const baseDecision: SignalMakerEntryDecision = {
+      enabled: false,
+      side: trade.side === 'SELL' ? 'SELL' : 'BUY',
+      tokenId: trade.tokenId,
+      candidatePrice: null,
+      candidateSizeUsd: copyNotional,
+      reason: 'signal_not_confirmed',
+    };
+
+    if (!signalConfirmation) {
+      return baseDecision;
+    }
+
+    if (trade.side !== 'BUY') {
+      return { ...baseDecision, reason: 'side_not_supported' };
+    }
+    if (trade.price < 0.95) {
+      return { ...baseDecision, reason: 'source_price_below_0_95' };
+    }
+    if (signalConfirmation.ageMs > SIGNAL_TTL_MS) {
+      return { ...baseDecision, reason: 'signal_expired' };
+    }
+    if (asksDepth !== 0) {
+      return { ...baseDecision, reason: 'asks_present' };
+    }
+    if (bestBid == null) {
+      return { ...baseDecision, reason: 'best_bid_missing' };
+    }
+    if (bestBid < config.trading.minReplicableBestBid) {
+      return { ...baseDecision, reason: 'best_bid_too_low' };
+    }
+    if ((trade.price - bestBid) > config.trading.maxSignalEntryBidGap) {
+      return { ...baseDecision, reason: 'bid_gap_too_wide' };
+    }
+
+    const candidatePrice = await this.executor.getValidatedPriceForDecision(
+      Math.min(trade.price, 0.99),
+      trade.tokenId
+    );
+
+    return {
+      enabled: true,
+      side: 'BUY',
+      tokenId: trade.tokenId,
+      candidatePrice,
+      candidateSizeUsd: copyNotional,
+      reason: 'signal_confirmed_no_asks_maker_candidate',
+    };
+  }
+
   private async handleNewTrade(trade: Trade): Promise<void> {
     if (trade.outcome === 'UNKNOWN') {
       const mappedOutcome = await this.executor.getOutcomeLabel(trade.tokenId);
@@ -323,6 +398,7 @@ class PolymarketCopyBot {
     }
 
     let effectiveTrade = trade;
+    let signalConfirmation: SignalConfirmationContext | null = null;
     const signalLookup = getSignal(signalKey, now);
     if (signalLookup.expired) {
       console.log('[Signal Expired]', {
@@ -362,6 +438,13 @@ class PolymarketCopyBot {
           effectiveTrade = {
             ...trade,
             price: boostedPrice,
+          };
+          signalConfirmation = {
+            ageMs: signalAgeMs,
+            signalPrice: signal.price,
+            confirmationPrice: sourcePrice,
+            entryPrice: boostedPrice,
+            signalSourceSize: signal.sourceSize,
           };
           deleteSignal(signalKey);
           console.log('[Signal Confirmed]', {
@@ -468,6 +551,35 @@ class PolymarketCopyBot {
     }
 
     const copyNotional = this.executor.calculateCopySize(effectiveTrade.size);
+    const signalMakerDecision = await this.shouldPlaceSignalMakerEntry({
+      trade: effectiveTrade,
+      signalConfirmation,
+      bestBid,
+      asksDepth,
+      copyNotional,
+    });
+    if (signalMakerDecision.enabled) {
+      console.log('[Signal Maker Entry Candidate]', {
+        tokenId: effectiveTrade.tokenId,
+        market: effectiveTrade.market,
+        sourcePrice: effectiveTrade.price,
+        bestBid,
+        asksDepth,
+        candidatePrice: signalMakerDecision.candidatePrice,
+        candidateSizeUsd: signalMakerDecision.candidateSizeUsd,
+        enabled: signalMakerDecision.enabled,
+        reason: signalMakerDecision.reason,
+      });
+    } else if (signalConfirmation) {
+      console.log('[Signal Maker Entry Rejected]', {
+        tokenId: effectiveTrade.tokenId,
+        market: effectiveTrade.market,
+        sourcePrice: effectiveTrade.price,
+        bestBid,
+        asksDepth,
+        reason: signalMakerDecision.reason,
+      });
+    }
     const riskCheck = this.risk.checkTrade(effectiveTrade, copyNotional);
     if (!riskCheck.allowed) {
       this.recordTradeLog(trade, {
