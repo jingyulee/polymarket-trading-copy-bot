@@ -1,4 +1,4 @@
-import { config, validateConfig } from './config.js';
+import { config, envPath, validateConfig } from './config.js';
 import { TradeMonitor } from './monitor.js';
 import { WebSocketMonitor } from './websocket-monitor.js';
 import type { Trade } from './monitor.js';
@@ -62,6 +62,7 @@ class PolymarketCopyBot {
   async initialize(): Promise<void> {
     console.log('🤖 Polymarket Copy Trading Bot');
     console.log('================================');
+    console.log(`ENV_PATH: ${envPath}`);
     console.log(`Target wallet: ${config.targetWallet} (from TARGET_WALLET)`);
     console.log(`Position multiplier: ${config.trading.positionSizeMultiplier * 100}%`);
     console.log(`Max trade size: ${config.trading.maxTradeSize} USDC`);

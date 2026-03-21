@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
+import { envPath } from './config.js';
 
 export type TradeLogAction =
   | 'skip'
@@ -84,13 +85,16 @@ export interface PerformanceStats {
   total_entry_notional: number;
 }
 
-const dbDir = path.resolve(process.cwd(), 'data');
+const sessionStartedAt = Date.now();
+const configuredDbPath = (process.env.DB_PATH || './data/trade-log.sqlite').trim();
+const resolvedDbPath = path.resolve(process.cwd(), configuredDbPath);
+const dbDir = path.dirname(resolvedDbPath);
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
-
-const sessionStartedAt = Date.now();
-const db = new Database(path.join(dbDir, 'trade-log.sqlite'));
+console.log(`DB_PATH: ${configuredDbPath} (${resolvedDbPath})`);
+console.log(`Config source: ${envPath}`);
+const db = new Database(resolvedDbPath);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS trade_log (

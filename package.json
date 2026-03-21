@@ -5,6 +5,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx src/index.ts",
+    "bot:layer1": "ENV_PATH=.env.layer1 tsx src/index.ts",
+    "bot:layer2": "ENV_PATH=.env.layer2 tsx src/index.ts",
     "build": "tsc",
     "start:prod": "node dist/index.js"
   },

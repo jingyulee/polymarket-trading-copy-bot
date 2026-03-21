@@ -1,5 +1,8 @@
 import * as dotenv from 'dotenv';
-dotenv.config();
+
+export const envPath = process.env.ENV_PATH || '.env';
+dotenv.config({ path: envPath });
+console.log(`ENV_PATH: ${envPath}`);
 
 function parseCsv(value?: string): string[] {
   if (!value) return [];
@@ -35,18 +38,18 @@ function parseSigType(): 0 | 1 | 2 {
 
 export const config = {
   targetWallet: process.env.TARGET_WALLET || '',
-  privateKey: process.env.WALLET_PRIVATE_KEY || '',
+  privateKey: process.env.WALLET_PRIVATE_KEY || process.env.PRIVATE_KEY || '',
   polymarketGeoToken: process.env.POLYMARKET_GEO_TOKEN || '',
   clobApiKey: process.env.CLOB_API_KEY || '',
-  clobApiSecret: process.env.CLOB_API_SECRET || '',
+  clobApiSecret: process.env.CLOB_API_SECRET || process.env.CLOB_SECRET || '',
   clobApiPassphrase: process.env.CLOB_API_PASSPHRASE || '',
   rpcUrl: process.env.RPC_URL || 'https://polygon-rpc.com',
-  chainId: 137,
+  chainId: parseNumber(process.env.CHAIN_ID, 137),
 
   /** Polymarket auth: sigType 0=EOA, 1=Poly Proxy, 2=Poly Polymorphic; PROXY_WALLET_ADDRESS required for 1/2. */
   auth: {
     sigType: parseSigType(),
-    funderAddress: process.env.PROXY_WALLET_ADDRESS || '',
+    funderAddress: process.env.PROXY_WALLET_ADDRESS || process.env.POLYMARKET_PROXY_ADDRESS || '',
   },
 
   // Polygon mainnet contracts used for approvals and balance checks.
