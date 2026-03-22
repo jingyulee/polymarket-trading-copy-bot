@@ -896,13 +896,23 @@ class PolymarketCopyBot {
     effectiveTrade = executionValidation.trade;
     const marketLockKey = getMarketLockKey(effectiveTrade);
     if (executionValidation.rejected) {
-      this.handleTradeSkip(trade, {
-        reason: executionValidation.reason || 'wrong_token_side_validation_failed',
-        sourceAgeMs,
-        marketLockKey,
-      });
-      this.printStats();
-      return;
+      if (executionValidation.reason !== 'market_outcome_map_missing' && executionValidation.chosenTokenId) {
+        console.log('[Execution Validation Bypassed]', {
+          market: effectiveTrade.market,
+          sourcePrice: executionSourcePrice,
+          chosenSide: executionValidation.outcomeSide,
+          tokenId: executionValidation.chosenTokenId,
+          reason: 'mvp_direct_execution',
+        });
+      } else {
+        this.handleTradeSkip(trade, {
+          reason: executionValidation.reason || 'wrong_token_side_validation_failed',
+          sourceAgeMs,
+          marketLockKey,
+        });
+        this.printStats();
+        return;
+      }
     }
 
     const marketLockSkipReason = marketLockKey
@@ -1056,6 +1066,13 @@ class PolymarketCopyBot {
 
     if (config.trading.enableSignalTrigger && signalConfirmation) {
       consumeSignal(signalKey, now);
+      console.log('[Execution Trigger MVP]', {
+        market: effectiveTrade.market,
+        sourcePrice: executionSourcePrice,
+        chosenSide: executionValidation?.outcomeSide || effectiveTrade.outcome,
+        tokenId: effectiveTrade.tokenId,
+        copyNotional: riskTargetNotional,
+      });
       console.log('[Execution Trigger]', {
         key: signalKey,
         market: effectiveTrade.market,
