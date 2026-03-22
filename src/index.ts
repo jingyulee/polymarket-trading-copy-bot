@@ -2,7 +2,7 @@ import { config, envPath, validateConfig } from './config.js';
 import { TradeMonitor } from './monitor.js';
 import { WebSocketMonitor } from './websocket-monitor.js';
 import type { Trade } from './monitor.js';
-import { TradeExecutor, type ExecutionValidationResult } from './trader.js';
+import { TradeExecutor, type ExecutionValidationResult, type SignalExecutionLifecycleEvent } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
 import { getMarketLockKey } from './filter.js';
@@ -82,6 +82,7 @@ class PolymarketCopyBot {
   constructor() {
     this.monitor = new TradeMonitor();
     this.executor = new TradeExecutor();
+    this.executor.setSignalExecutionLifecycleHandler(this.handleSignalExecutionLifecycle.bind(this));
     this.positions = new PositionTracker();
     this.risk = new RiskManager(this.positions);
   }
@@ -489,6 +490,52 @@ class PolymarketCopyBot {
       orderId: result.orderId,
       status: 'open',
     });
+  }
+
+  private handleSignalExecutionLifecycle(event: SignalExecutionLifecycleEvent): void {
+    if (event.event === 'open_order_expired_cancelled') {
+      console.log('[Retry After Expire Available]', {
+        market: event.market,
+        tokenId: event.tokenId,
+        sourceSide: event.sourceSide,
+        executionSide: event.executionSide,
+        orderId: event.orderId,
+      });
+      return;
+    }
+
+    const syntheticTrade: Trade = {
+      txHash: `open-order:${event.orderId}`,
+      market: event.market,
+      marketSlug: event.marketSlug,
+      conditionId: event.conditionId,
+      tokenId: event.tokenId,
+      sourceTrader: undefined,
+      outcome: event.executionSide,
+      outcomeName: event.executionSide,
+      side: 'BUY',
+      price: event.sourcePrice,
+      size: event.submittedNotional,
+      timestamp: Date.now(),
+    };
+    const marketLockKey = getMarketLockKey(syntheticTrade);
+    const matchedNotional = Math.round(event.matchedShares * event.executionPrice * 10000) / 10000;
+
+    this.handleSuccessfulExecution(
+      syntheticTrade,
+      {
+        orderId: event.orderId,
+        copyNotional: matchedNotional,
+        copyShares: event.matchedShares,
+        price: event.executionPrice,
+        side: 'BUY',
+        tokenId: event.tokenId,
+      },
+      0,
+      marketLockKey,
+      event.event === 'open_order_filled' ? 'executed_from_open_order' : 'partially_filled_then_cancelled',
+      true
+    );
   }
 
   private getMarketRetryState(marketLockKey: string, now: number): MarketRetryState | null {
@@ -1016,8 +1063,19 @@ class PolymarketCopyBot {
 
     try {
       const result = await this.executor.executeCopyTrade(effectiveTrade, copyNotional);
-      this.handleSuccessfulExecution(trade, result, sourceAgeMs, marketLockKey, 'executed', true);
-      console.log('✅ Successfully copied trade');
+      if (result.actualFill) {
+        this.handleSuccessfulExecution(trade, result, sourceAgeMs, marketLockKey, 'executed', true);
+        console.log('✅ Successfully copied trade');
+      } else {
+        console.log('[Execution Submitted Awaiting Fill]', {
+          market: effectiveTrade.market,
+          tokenId: result.tokenId,
+          orderId: result.orderId,
+          sourceSide: trade.outcome,
+          executionSide: effectiveTrade.outcome,
+          finalStatus: result.finalStatus,
+        });
+      }
       await sendTelegram(formatTradeMessage(trade, {
         mode: 'LIVE',
         decision: 'ORDER_PLACED',

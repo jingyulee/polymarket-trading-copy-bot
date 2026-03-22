@@ -123,6 +123,8 @@ export interface CopyExecutionResult {
   price: number;
   side: 'BUY' | 'SELL';
   tokenId: string;
+  actualFill: boolean;
+  finalStatus: 'FILLED' | 'SUBMITTED_OPEN' | 'PARTIALLY_FILLED' | 'CANCELLED';
 }
 
 export interface SignalMakerExecutionResult extends CopyExecutionResult {
@@ -156,6 +158,30 @@ interface ActiveOpenOrder {
   timeoutHandle: ReturnType<typeof setTimeout>;
 }
 
+interface SignalExecutionState {
+  noFillCancelledCount: number;
+  hasActualFill: boolean;
+}
+
+export interface SignalExecutionLifecycleEvent {
+  event:
+    | 'open_order_filled'
+    | 'open_order_partially_filled_then_cancelled'
+    | 'open_order_expired_cancelled';
+  market: string;
+  marketSlug?: string;
+  conditionId?: string;
+  tokenId: string;
+  sourceSide: string;
+  executionSide: string;
+  sourcePrice: number;
+  executionPrice: number;
+  orderId: string;
+  submittedNotional: number;
+  submittedShares: number;
+  matchedShares: number;
+}
+
 export class TradeExecutor {
   private wallet: ethers.Wallet;
   private provider: ethers.providers.JsonRpcProvider;
@@ -167,6 +193,8 @@ export class TradeExecutor {
   private outcomeMapByMarketSlug = new Map<string, OutcomeTokenMap>();
   private activeMarketsCache?: ActiveMarketsCacheEntry;
   private activeOpenOrders = new Map<string, ActiveOpenOrder>();
+  private signalExecutionStates = new Map<string, SignalExecutionState>();
+  private signalExecutionLifecycleHandler?: (event: SignalExecutionLifecycleEvent) => void;
   private warnedMissingOutcomeMappings = new Set<string>();
   private readonly CACHE_TTL = 3600000;
   private readonly ACTIVE_MARKETS_CACHE_TTL = 60_000;
@@ -218,6 +246,12 @@ export class TradeExecutor {
       funder,
       config.polymarketGeoToken || undefined
     );
+  }
+
+  setSignalExecutionLifecycleHandler(
+    handler: ((event: SignalExecutionLifecycleEvent) => void) | undefined
+  ): void {
+    this.signalExecutionLifecycleHandler = handler;
   }
 
   private getSignerAddress(): string {
@@ -1931,6 +1965,8 @@ export class TradeExecutor {
       price: plan.fallbackPrice,
       side: originalTrade.side,
       tokenId: originalTrade.tokenId,
+      actualFill: response.status !== 'LIVE',
+      finalStatus: response.status === 'LIVE' ? 'SUBMITTED_OPEN' : 'FILLED',
     };
   }
 
@@ -1940,6 +1976,29 @@ export class TradeExecutor {
   ): Promise<CopyExecutionResult> {
     const initialCopyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
     const openOrderKey = this.getOpenOrderKey(originalTrade);
+    const signalExecutionState = this.getSignalExecutionState(openOrderKey);
+
+    if (signalExecutionState.hasActualFill) {
+      console.log('[Market Hard Lock Skip]', {
+        market: originalTrade.market,
+        tokenId: originalTrade.tokenId,
+        lockKey: openOrderKey,
+      });
+      throw new Error('SKIP:market_already_executed');
+    }
+
+    if (signalExecutionState.noFillCancelledCount >= 2) {
+      console.log('[Retry After Expire Skip]', {
+        market: originalTrade.market,
+        tokenId: originalTrade.tokenId,
+        sourceSide: originalTrade.outcome,
+        executionSide: originalTrade.outcome,
+        retryAfterExpireUsed: 1,
+        noFillCancelledCount: signalExecutionState.noFillCancelledCount,
+      });
+      throw new Error('SKIP:market_retry_exhausted');
+    }
+
     const existingOpenOrder = this.activeOpenOrders.get(openOrderKey);
 
     if (existingOpenOrder) {
@@ -1966,9 +2025,7 @@ export class TradeExecutor {
     }
 
     const pricePlan = await this.buildSignalExecutionPricePlan(originalTrade.tokenId, Number(originalTrade.price));
-    const executionPrice = Number(originalTrade.price) >= 0.99
-      ? this.normalizePriceDownToTick(0.99, pricePlan.tickSize)
-      : pricePlan.normalizedExecutionPrice;
+    const executionPrice = pricePlan.normalizedExecutionPrice;
     let adjustedCopyNotional = initialCopyNotional;
     let adjustedCopyShares = this.calculateSharesFromNotional(adjustedCopyNotional, executionPrice);
     const minSizeAdjusted = adjustedCopyShares < MIN_SHARES;
@@ -2165,6 +2222,39 @@ export class TradeExecutor {
     return `${marketKey}|${sideKey}`;
   }
 
+  private getSignalExecutionState(key: string): SignalExecutionState {
+    return this.signalExecutionStates.get(key) || {
+      noFillCancelledCount: 0,
+      hasActualFill: false,
+    };
+  }
+
+  private setSignalExecutionState(key: string, nextState: SignalExecutionState): void {
+    this.signalExecutionStates.set(key, nextState);
+  }
+
+  private markSignalExecutionFilled(key: string): void {
+    const state = this.getSignalExecutionState(key);
+    this.setSignalExecutionState(key, {
+      ...state,
+      hasActualFill: true,
+    });
+  }
+
+  private markSignalExecutionNoFillCancelled(key: string): number {
+    const state = this.getSignalExecutionState(key);
+    const nextState: SignalExecutionState = {
+      ...state,
+      noFillCancelledCount: state.noFillCancelledCount + 1,
+    };
+    this.setSignalExecutionState(key, nextState);
+    return nextState.noFillCancelledCount;
+  }
+
+  private emitSignalExecutionLifecycleEvent(event: SignalExecutionLifecycleEvent): void {
+    this.signalExecutionLifecycleHandler?.(event);
+  }
+
   private isTerminalFilledStatus(status: string): boolean {
     return ['FILLED', 'MATCHED', 'COMPLETED'].includes(status);
   }
@@ -2225,20 +2315,39 @@ export class TradeExecutor {
 
       if (this.isTerminalFilledStatus(status) || matchedSize >= originalSize - 0.0001) {
         this.clearActiveOpenOrder(key);
+        const finalMatchedShares = matchedSize > 0 ? matchedSize : originalSize;
+        this.markSignalExecutionFilled(key);
         console.log('[Open Order Already Filled]', {
           market: activeOrder.market,
           orderId: activeOrder.orderId,
           tokenId: activeOrder.tokenId,
+          matchedShares: finalMatchedShares,
+        });
+        this.emitSignalExecutionLifecycleEvent({
+          event: 'open_order_filled',
+          market: activeOrder.market,
+          marketSlug: activeOrder.marketSlug,
+          conditionId: activeOrder.conditionId,
+          tokenId: activeOrder.tokenId,
+          sourceSide: activeOrder.sourceSide,
+          executionSide: activeOrder.executionSide,
+          sourcePrice: activeOrder.sourcePrice,
+          executionPrice: activeOrder.executionPrice,
+          orderId: activeOrder.orderId,
+          submittedNotional: activeOrder.notional,
+          submittedShares: activeOrder.shares,
+          matchedShares: finalMatchedShares,
         });
         return;
       }
     } catch (error: any) {
       if (this.isClosedOrderError(error)) {
         this.clearActiveOpenOrder(key);
-        console.log('[Open Order Already Filled]', {
+        console.log('[Open Order Closed Before TTL Handling]', {
           market: activeOrder.market,
           orderId: activeOrder.orderId,
           tokenId: activeOrder.tokenId,
+          finalStatus: 'closed_unknown',
         });
         return;
       }
@@ -2248,19 +2357,76 @@ export class TradeExecutor {
     try {
       await this.clobClient.cancelOrder({ orderID: activeOrder.orderId });
       this.clearActiveOpenOrder(key);
+      const finalStatus = matchedSize > 0 ? 'partially_filled_then_cancelled' : 'expired_cancelled';
+      if (matchedSize > 0) {
+        this.markSignalExecutionFilled(key);
+      } else {
+        const noFillCancelledCount = this.markSignalExecutionNoFillCancelled(key);
+        console.log('[Retry After Expire State]', {
+          market: activeOrder.market,
+          tokenId: activeOrder.tokenId,
+          sourceSide: activeOrder.sourceSide,
+          executionSide: activeOrder.executionSide,
+          noFillCancelledCount,
+          retryAfterExpireAvailable: noFillCancelledCount < 2,
+        });
+      }
       console.log('[Open Order Cancelled]', {
         market: activeOrder.market,
         orderId: activeOrder.orderId,
         tokenId: activeOrder.tokenId,
-        finalStatus: matchedSize > 0 ? 'partially_filled_then_cancelled' : 'expired_cancelled',
+        finalStatus,
+      });
+      this.emitSignalExecutionLifecycleEvent({
+        event: matchedSize > 0
+          ? 'open_order_partially_filled_then_cancelled'
+          : 'open_order_expired_cancelled',
+        market: activeOrder.market,
+        marketSlug: activeOrder.marketSlug,
+        conditionId: activeOrder.conditionId,
+        tokenId: activeOrder.tokenId,
+        sourceSide: activeOrder.sourceSide,
+        executionSide: activeOrder.executionSide,
+        sourcePrice: activeOrder.sourcePrice,
+        executionPrice: activeOrder.executionPrice,
+        orderId: activeOrder.orderId,
+        submittedNotional: activeOrder.notional,
+        submittedShares: activeOrder.shares,
+        matchedShares: matchedSize,
       });
     } catch (error: any) {
       if (this.isClosedOrderError(error)) {
         this.clearActiveOpenOrder(key);
-        console.log('[Open Order Already Filled]', {
+        if (matchedSize > 0) {
+          this.markSignalExecutionFilled(key);
+          console.log('[Open Order Already Filled]', {
+            market: activeOrder.market,
+            orderId: activeOrder.orderId,
+            tokenId: activeOrder.tokenId,
+            matchedShares: matchedSize,
+          });
+          this.emitSignalExecutionLifecycleEvent({
+            event: 'open_order_partially_filled_then_cancelled',
+            market: activeOrder.market,
+            marketSlug: activeOrder.marketSlug,
+            conditionId: activeOrder.conditionId,
+            tokenId: activeOrder.tokenId,
+            sourceSide: activeOrder.sourceSide,
+            executionSide: activeOrder.executionSide,
+            sourcePrice: activeOrder.sourcePrice,
+            executionPrice: activeOrder.executionPrice,
+            orderId: activeOrder.orderId,
+            submittedNotional: activeOrder.notional,
+            submittedShares: activeOrder.shares,
+            matchedShares: matchedSize,
+          });
+          return;
+        }
+        console.log('[Open Order Closed Before TTL Handling]', {
           market: activeOrder.market,
           orderId: activeOrder.orderId,
           tokenId: activeOrder.tokenId,
+          finalStatus: 'closed_unknown',
         });
         return;
       }
@@ -2492,6 +2658,7 @@ export class TradeExecutor {
     });
 
     if (takerResponse.success) {
+      this.markSignalExecutionFilled(this.getOpenOrderKey(originalTrade));
       console.log('[Execution Success]', {
         tokenId: originalTrade.tokenId,
         phase: 'taker_first',
@@ -2517,6 +2684,8 @@ export class TradeExecutor {
         price: executionPrice,
         side: originalTrade.side,
         tokenId: originalTrade.tokenId,
+        actualFill: true,
+        finalStatus: 'FILLED',
       };
     }
 
@@ -2610,8 +2779,32 @@ export class TradeExecutor {
         shares: copyShares,
         notional: copyNotional,
       });
+      console.log('[Execution Submitted]', {
+        tokenId: originalTrade.tokenId,
+        phase: 'short_gtc_fallback',
+        sourceSide: originalTrade.outcome,
+        executionSide: originalTrade.outcome,
+        pricingMode: pricePlan.pricingMode,
+        rawSourcePrice: pricePlan.rawSourcePrice,
+        tickSize: pricePlan.tickSize,
+        normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+        roundingApplied: pricePlan.roundingApplied,
+        orderId: fallbackResponse.orderID,
+        finalStatus: 'SUBMITTED_OPEN',
+      });
+      return {
+        orderId: fallbackResponse.orderID,
+        copyNotional,
+        copyShares,
+        price: executionPrice,
+        side: originalTrade.side,
+        tokenId: originalTrade.tokenId,
+        actualFill: false,
+        finalStatus: 'SUBMITTED_OPEN',
+      };
     }
 
+    this.markSignalExecutionFilled(this.getOpenOrderKey(originalTrade));
     console.log('[Execution Success]', {
       tokenId: originalTrade.tokenId,
       phase: 'short_gtc_fallback',
@@ -2637,6 +2830,8 @@ export class TradeExecutor {
       price: executionPrice,
       side: originalTrade.side,
       tokenId: originalTrade.tokenId,
+      actualFill: true,
+      finalStatus: 'FILLED',
     };
   }
 
@@ -2725,6 +2920,8 @@ export class TradeExecutor {
             price: resolvedPrice,
             side: originalTrade.side,
             tokenId: originalTrade.tokenId,
+            actualFill: true,
+            finalStatus: 'PARTIALLY_FILLED',
           };
         }
       } catch (error: any) {
@@ -2876,6 +3073,7 @@ export class TradeExecutor {
             price: resolvedPrice,
             side: originalTrade.side,
             tokenId: originalTrade.tokenId,
+            actualFill: true,
             candidatePrice: validatedPrice,
             candidateNotional: params.candidateNotional,
             finalStatus: 'FILLED',
@@ -2926,6 +3124,7 @@ export class TradeExecutor {
         price: resolvedPrice,
         side: originalTrade.side,
         tokenId: originalTrade.tokenId,
+        actualFill: true,
         candidatePrice: validatedPrice,
         candidateNotional: params.candidateNotional,
         finalStatus: 'PARTIALLY_FILLED',
@@ -2963,6 +3162,7 @@ export class TradeExecutor {
       price: resolvedPrice,
       side: originalTrade.side,
       tokenId: originalTrade.tokenId,
+      actualFill: false,
       candidatePrice: validatedPrice,
       candidateNotional: params.candidateNotional,
       finalStatus: 'CANCELLED',
@@ -3083,6 +3283,8 @@ export class TradeExecutor {
             price: resolvedPrice,
             side: originalTrade.side,
             tokenId: originalTrade.tokenId,
+            actualFill: true,
+            finalStatus: 'FILLED',
           };
         }
       } catch (error: any) {
@@ -3125,6 +3327,8 @@ export class TradeExecutor {
         price: resolvedPrice,
         side: originalTrade.side,
         tokenId: originalTrade.tokenId,
+        actualFill: true,
+        finalStatus: 'PARTIALLY_FILLED',
       };
     }
 
@@ -3232,6 +3436,8 @@ export class TradeExecutor {
         price: validatedPrice,
         side: originalTrade.side,
         tokenId: originalTrade.tokenId,
+        actualFill: response.status !== 'LIVE',
+        finalStatus: response.status === 'LIVE' ? 'SUBMITTED_OPEN' : 'FILLED',
       };
     } else {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
@@ -3349,6 +3555,8 @@ export class TradeExecutor {
         price: validatedPrice,
         side: originalTrade.side,
         tokenId: originalTrade.tokenId,
+        actualFill: response.status !== 'LIVE',
+        finalStatus: response.status === 'LIVE' ? 'SUBMITTED_OPEN' : 'FILLED',
       };
     } else {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
