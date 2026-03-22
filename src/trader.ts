@@ -1906,42 +1906,113 @@ export class TradeExecutor {
     console.log(`   Token ID: ${originalTrade.tokenId}`);
     console.log(`   Copy notional: ${copyNotional} USDC`);
 
-    return this.executeWithRetry(async () => {
-      const orderbook = await this.getOrderbookForExecution(originalTrade.tokenId);
-      const bestBidValue = Number(orderbook?.bids?.[0]?.price);
-      const bestAskValue = Number(orderbook?.asks?.[0]?.price);
-      const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
-      const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
-      const asksDepth = Array.isArray(orderbook?.asks) ? orderbook.asks.length : 0;
-
-      if (asksDepth === 0) {
-        throw new Error('no_liquidity');
-      }
-      if (bestAsk == null || bestAsk <= 0) {
-        throw new Error('invalid_orderbook');
-      }
-      if (bestBid != null && bestBid < 0.01 && Number(originalTrade.price) > 0.9) {
-        throw new Error('wrong_orderbook_side');
+    let lastFailureReason = 'execution_failed';
+    for (const attempt of [
+      { attempt: 1, orderType: 'FOK' as const },
+      { attempt: 2, orderType: 'FAK' as const },
+    ]) {
+      const refreshedBook = await this.refreshExecutionBook(originalTrade);
+      if (refreshedBook.bestAsk == null || refreshedBook.asksDepth === 0) {
+        console.log('[Execution Skip]', {
+          market: originalTrade.market,
+          tokenId: originalTrade.tokenId,
+          reason: 'no_ask_on_source_side',
+        });
+        throw new Error(attempt.attempt === 1 ? 'no_ask_on_source_side' : 'no_liquidity');
       }
 
-      const slippage = Number(originalTrade.price) > 0
-        ? (bestAsk - Number(originalTrade.price)) / Number(originalTrade.price)
-        : null;
-
-      if (slippage == null || slippage > 0.001) {
-        throw new Error('slippage_too_high');
+      const priceDriftBps = this.getPriceGapBps(Number(originalTrade.price), refreshedBook.bestAsk);
+      if (priceDriftBps > config.trading.mvpMaxPriceDriftBps) {
+        console.log('[Execution Skip]', {
+          market: originalTrade.market,
+          tokenId: originalTrade.tokenId,
+          reason: 'execution_price_moved_too_far',
+          sourcePrice: originalTrade.price,
+          latestBestAsk: refreshedBook.bestAsk,
+          priceDriftBps,
+        });
+        throw new Error('execution_price_moved_too_far');
       }
+
+      const validatedPrice = await this.validatePrice(refreshedBook.bestAsk, originalTrade.tokenId);
+      const derivedShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+      console.log('[Execution Plan]', {
+        sourceSide: originalTrade.outcome,
+        sourceTokenId: originalTrade.tokenId,
+        executionTokenId: originalTrade.tokenId,
+        sourcePrice: originalTrade.price,
+        latestBestAsk: refreshedBook.bestAsk,
+        chosenPrice: validatedPrice,
+        priceDriftBps,
+        copyNotional,
+        derivedShares,
+        orderType: attempt.orderType,
+      });
 
       try {
-        return this.executeSignalTakerOrder(originalTrade, copyNotional, bestAsk, bestBid, bestAsk, slippage);
+        return await this.executeMvpTakerAttempt(
+          originalTrade,
+          copyNotional,
+          validatedPrice,
+          derivedShares,
+          refreshedBook.bestBid,
+          refreshedBook.bestAsk,
+          attempt.orderType,
+          attempt.attempt
+        );
       } catch (error: any) {
-        if (bestBid == null) {
-          throw error;
-        }
-        console.log(`⚠️  Taker path failed, attempting maker fallback: ${error?.message || 'Unknown error'}`);
-        return this.executeSignalMakerOrder(originalTrade, copyNotional, bestBid, bestAsk, slippage);
+        lastFailureReason = error?.message || lastFailureReason;
+        console.log('[Execution Failure]', {
+          attempt: attempt.attempt,
+          orderType: attempt.orderType,
+          reason: lastFailureReason,
+        });
       }
+    }
+
+    throw new Error(lastFailureReason);
+  }
+
+  private async refreshExecutionBook(originalTrade: Trade): Promise<{
+    orderbook: any;
+    bestBid: number | null;
+    bestAsk: number | null;
+    bidsDepth: number;
+    asksDepth: number;
+  }> {
+    let orderbook: any;
+    try {
+      const fetched = await this.clobClient.getOrderBook(originalTrade.tokenId);
+      const normalized = this.setOrderbookCache(originalTrade.tokenId, fetched, 'execution_fetch');
+      orderbook = { bids: normalized.bids, asks: normalized.asks };
+    } catch (error: any) {
+      if (this.isOrderbookNotFoundError(error)) {
+        console.log('[Execution Skip]', {
+          market: originalTrade.market,
+          tokenId: originalTrade.tokenId,
+          reason: 'no_orderbook_on_source_side',
+        });
+        throw new Error('no_orderbook_on_source_side');
+      }
+      throw error;
+    }
+    const { bestBid, bestAsk, bidsDepth, asksDepth } = this.getTopOfBook(orderbook);
+    console.log('[Execution Book Refresh]', {
+      tokenId: originalTrade.tokenId,
+      sourceSide: originalTrade.outcome,
+      sourcePrice: originalTrade.price,
+      bestBid,
+      bestAsk,
+      bidsDepth,
+      asksDepth,
     });
+    return {
+      orderbook,
+      bestBid,
+      bestAsk,
+      bidsDepth,
+      asksDepth,
+    };
   }
 
   private async executeWithRetry<T>(
@@ -2105,89 +2176,76 @@ export class TradeExecutor {
     });
   }
 
-  private async executeSignalTakerOrder(
+  private async executeMvpTakerAttempt(
     originalTrade: Trade,
     copyNotional: number,
     executionPrice: number,
+    copyShares: number,
     bestBid: number | null,
     bestAsk: number | null,
-    slippage: number | null
+    orderType: 'FOK' | 'FAK',
+    attempt: number
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
     const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
-    const validatedPrice = await this.validatePrice(executionPrice, originalTrade.tokenId);
-    const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
-
-    console.log('[Execution Plan]', {
-      mode: 'TAKER',
+    console.log('[Order Params Build]', {
+      market: originalTrade.market,
+      executionSide: originalTrade.outcome,
+      executionTokenId: originalTrade.tokenId,
       sourcePrice: originalTrade.price,
-      bestBid,
-      bestAsk,
-      chosenPrice: validatedPrice,
-      slippage,
-      tokenId: originalTrade.tokenId,
-      side: 'BUY',
+      chosenBestAsk: bestAsk,
+      copyNotional,
+      derivedPrice: executionPrice,
+      derivedShares: copyShares,
+      orderType,
     });
 
-    for (const orderType of ['FOK', 'FAK'] as const) {
-      console.log('[Order Params Build]', {
-        market: originalTrade.market,
-        executionSide: originalTrade.outcome,
-        executionTokenId: originalTrade.tokenId,
-        sourcePrice: originalTrade.price,
-        chosenBestAsk: bestAsk,
-        copyNotional,
-        derivedPrice: validatedPrice,
-        derivedShares: copyShares,
-        orderType,
-      });
+    console.log('[Execution Attempt]', {
+      attempt,
+      orderType,
+      tokenId: originalTrade.tokenId,
+      market: originalTrade.market,
+      sourcePrice: originalTrade.price,
+      executionPrice: executionPrice,
+      copyNotional,
+    });
 
-      console.log('[Signal Taker Attempt]', {
-        tokenId: originalTrade.tokenId,
-        market: originalTrade.market,
-        side: originalTrade.side,
-        sourcePrice: originalTrade.price,
-        executionPrice: validatedPrice,
-        orderType,
-        copyNotional,
-      });
+    const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+    const response = await this.clobClient.createAndPostMarketOrder(
+      {
+        tokenID: originalTrade.tokenId,
+        amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
+        price: executionPrice,
+        side: originalTrade.side as Side,
+        feeRateBps,
+        orderType: orderTypeEnum,
+      },
+      orderOpts,
+      orderTypeEnum
+    );
 
-      const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
-      const response = await this.clobClient.createAndPostMarketOrder(
-        {
-          tokenID: originalTrade.tokenId,
-          amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
-          price: validatedPrice,
-          side: originalTrade.side as Side,
-          feeRateBps,
-          orderType: orderTypeEnum,
-        },
-        orderOpts,
-        orderTypeEnum
-      );
-
-      if (response.success) {
-        console.log(`✅ ${orderType} order executed: ${response.orderID}`);
-        return {
-          orderId: response.orderID,
-          copyNotional,
-          copyShares,
-          price: validatedPrice,
-          side: originalTrade.side,
-          tokenId: originalTrade.tokenId,
-        };
-      }
-
+    if (!response.success) {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      console.log(`❌ ${orderType} order failed: ${errorMsg}`);
-      if (orderType === 'FAK') {
-        throw new Error(`FAK_failed:${errorMsg}`);
-      }
+      throw new Error(`${orderType}_failed:${errorMsg}`);
     }
 
-    throw new Error('order_param_build_failed');
+    console.log('[Execution Success]', {
+      tokenId: originalTrade.tokenId,
+      side: originalTrade.outcome,
+      price: executionPrice,
+      shares: copyShares,
+      notional: copyNotional,
+    });
+    return {
+      orderId: response.orderID,
+      copyNotional,
+      copyShares,
+      price: executionPrice,
+      side: originalTrade.side,
+      tokenId: originalTrade.tokenId,
+    };
   }
 
   private async executeSignalMakerOrder(
