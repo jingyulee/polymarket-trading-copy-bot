@@ -2,10 +2,10 @@ import { config, envPath, validateConfig } from './config.js';
 import { TradeMonitor } from './monitor.js';
 import { WebSocketMonitor } from './websocket-monitor.js';
 import type { Trade } from './monitor.js';
-import { TradeExecutor, type ExecutionValidationResult, type SignalMakerExecutionResult } from './trader.js';
+import { TradeExecutor, type ExecutionValidationResult } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
-import { applyFilters, applyLightweightFilters, getMarketLockKey } from './filter.js';
+import { getMarketLockKey } from './filter.js';
 import { classifyCryptoMarket } from './crypto-market.js';
 import { getMarketLockBehavior, isStrategyFilterSkipReason, type MarketLockType } from './market-lock.js';
 import {
@@ -821,18 +821,8 @@ class PolymarketCopyBot {
           price: candidateSignalConfirmation.effectiveSignalPrice,
           size: Math.max(trade.size, candidateSignalConfirmation.cumulativeSourceUsd),
         };
-        const signalPrecheck = await this.executor.precheckSignalSourceSide(candidateTrade);
-        if (!signalPrecheck.ok) {
-          this.handleTradeSkip(trade, {
-            reason: signalPrecheck.reason || 'no_ask_on_source_side',
-            sourceAgeMs,
-            marketLockKey: getMarketLockKey(signalPrecheck.trade),
-          });
-          this.printStats();
-          return;
-        }
         signalConfirmation = candidateSignalConfirmation;
-        effectiveTrade = signalPrecheck.trade;
+        effectiveTrade = candidateTrade;
         if (signalConfirmation.fastTrigger) {
           console.log('[Signal Fast Trigger]', {
             market: effectiveTrade.market,
@@ -871,6 +861,15 @@ class PolymarketCopyBot {
     this.executor.seedOutcomeMapFromTrade(effectiveTrade);
 
     const executionSourcePrice = signalConfirmation?.effectiveSignalPrice ?? sourcePrice;
+    if (executionSourcePrice < 0.97) {
+      this.handleTradeSkip(trade, {
+        reason: 'low_confidence',
+        sourceAgeMs,
+        marketLockKey: getMarketLockKey(effectiveTrade),
+      });
+      this.printStats();
+      return;
+    }
     if (sourceSizeUsd > 1000) {
       this.handleTradeSkip(trade, {
         reason: 'whale_trade',
@@ -937,131 +936,8 @@ class PolymarketCopyBot {
       return;
     }
 
-    const liquiditySymbolCheck = this.getLiquiditySymbolCheck(effectiveTrade);
-    const lightweightFilterResult = applyLightweightFilters(effectiveTrade, {
-      now,
-    });
-
-    if (!lightweightFilterResult.pass) {
-      this.handleTradeSkip(trade, {
-        reason: lightweightFilterResult.reason,
-        sourceAgeMs,
-        marketLockKey,
-      });
-      console.log(`⚠️  Lightweight filter skipped trade: ${lightweightFilterResult.reason}`);
-      this.printStats();
-      return;
-    }
-
-    if (this.wsMonitor) {
-      await this.wsMonitor.subscribeToMarket(effectiveTrade.tokenId);
-    }
-
-    const orderbook = executionValidation?.orderbook ?? await this.executor.getOrderbook(effectiveTrade.tokenId);
-    const bestBidValue = executionValidation?.bestBid ?? Number(orderbook?.bids?.[0]?.price);
-    const bestAskValue = executionValidation?.bestAsk ?? Number(orderbook?.asks?.[0]?.price);
-    const bestAskSize = Number(orderbook?.asks?.[0]?.size);
-    const bidsDepth = orderbook?.bids?.length || 0;
-    const asksDepth = orderbook?.asks?.length || 0;
-    const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
-    const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
-    const spread = bestBid != null && bestAsk != null ? bestAsk - bestBid : null;
-    const bestAskLiquidityUsd = bestAsk != null && Number.isFinite(bestAskSize)
-      ? bestAsk * bestAskSize
-      : undefined;
-
-    const filterResult = applyFilters(trade, {
-      now,
-      bestBid: bestBid ?? undefined,
-      bestAsk: bestAsk ?? undefined,
-      bestAskLiquidityUsd,
-      spread: spread ?? undefined,
-      bidsDepth,
-      asksDepth,
-      marketLocks: this.marketLocks,
-    });
-    const effectiveFilterResult = effectiveTrade === trade
-      ? filterResult
-      : applyFilters(effectiveTrade, {
-        now,
-        bestBid: bestBid ?? undefined,
-        bestAsk: bestAsk ?? undefined,
-        bestAskLiquidityUsd,
-        spread: spread ?? undefined,
-        bidsDepth,
-        asksDepth,
-        marketLocks: this.marketLocks,
-      });
-
-    const noLiquidityBothSides = effectiveFilterResult.reason === 'no_asks_in_orderbook' && asksDepth === 0 && (bestBid == null || bidsDepth === 0);
-    if (!effectiveFilterResult.pass) {
-      const resolvedReason = noLiquidityBothSides ? 'no_liquidity_both_sides' : effectiveFilterResult.reason;
-      this.handleTradeSkip(trade, {
-        reason: resolvedReason,
-        sourceAgeMs,
-        marketLockKey,
-      });
-      console.log(`⚠️  Filter skipped trade: ${resolvedReason}`);
-      console.log('   Filter market snapshot:', {
-        bestBid,
-        bestAsk,
-        spread,
-        bidsDepth,
-        asksDepth,
-      });
-      this.printStats();
-      return;
-    }
-
     const copyNotional = this.executor.calculateCopySize(effectiveTrade.size);
-    const marketLocked = config.trading.oneTradePerMarket && this.marketLocks.has(marketLockKey);
-    const signalMakerDecision = signalConfirmation
-      ? {
-        enabled: false,
-        side: effectiveTrade.side === 'SELL' ? 'SELL' : 'BUY',
-        tokenId: effectiveTrade.tokenId,
-        candidatePrice: null,
-        candidateSizeUsd: copyNotional,
-        marketLocked,
-        reason: 'prioritize_real_execution',
-      }
-      : await this.shouldPlaceSignalMakerEntry({
-        trade: effectiveTrade,
-        signalConfirmation,
-        bestBid,
-        asksDepth,
-        copyNotional,
-        marketLocked,
-      });
-    if (signalConfirmation) {
-      console.log('[Signal Maker Entry Disabled In MVP]', {
-        market: effectiveTrade.market,
-        reason: 'prioritize_real_execution',
-      });
-    }
-    if (signalMakerDecision.enabled) {
-      console.log('[Signal Maker Entry Candidate]', {
-        tokenId: effectiveTrade.tokenId,
-        market: effectiveTrade.market,
-        sourcePrice: effectiveTrade.price,
-        bestBid,
-        asksDepth,
-        candidatePrice: signalMakerDecision.candidatePrice,
-        candidateSizeUsd: signalMakerDecision.candidateSizeUsd,
-        enabled: signalMakerDecision.enabled,
-        reason: signalMakerDecision.reason,
-      });
-    } else if (signalConfirmation) {
-      console.log('[Signal Maker Entry Rejected]', {
-        tokenId: effectiveTrade.tokenId,
-        market: effectiveTrade.market,
-        sourcePrice: effectiveTrade.price,
-        bestBid,
-        asksDepth,
-        reason: signalMakerDecision.reason,
-      });
-    }
-    const riskTargetNotional = signalMakerDecision.enabled ? signalMakerDecision.candidateSizeUsd : copyNotional;
+    const riskTargetNotional = copyNotional;
     const riskCheck = this.risk.checkTrade(effectiveTrade, riskTargetNotional);
     if (!riskCheck.allowed) {
       this.handleTradeSkip(trade, {
@@ -1098,76 +974,15 @@ class PolymarketCopyBot {
       });
     }
 
-    if (signalMakerDecision.enabled && !config.trading.dryRun && signalMakerDecision.candidatePrice != null) {
-      try {
-        const makerResult: SignalMakerExecutionResult = await this.executor.executeSignalMakerEntry(effectiveTrade, {
-          candidatePrice: signalMakerDecision.candidatePrice,
-          candidateNotional: signalMakerDecision.candidateSizeUsd,
-          reason: signalMakerDecision.reason,
-        });
-
-        if (makerResult.filledNotional > 0) {
-          this.handleSuccessfulExecution(trade, {
-            orderId: makerResult.orderId,
-            copyNotional: makerResult.filledNotional,
-            copyShares: makerResult.filledSize,
-            price: makerResult.price,
-            side: makerResult.side,
-            tokenId: makerResult.tokenId,
-          }, sourceAgeMs, marketLockKey, makerResult.reason, true);
-          console.log('✅ Signal maker entry executed');
-          await sendTelegram(formatTradeMessage(trade, {
-            mode: 'LIVE',
-            decision: 'ORDER_PLACED',
-            copyNotional: makerResult.filledNotional,
-            fillPrice: makerResult.price,
-            fillSize: makerResult.filledSize,
-            sourceAgeMs,
-          }));
-        } else {
-          this.handleTradeSkip(trade, {
-            reason: makerResult.reason,
-            sourceAgeMs,
-            marketLockKey,
-            copyNotional: signalMakerDecision.candidateSizeUsd,
-          });
-          console.log(`⏭️  Signal maker entry ended without fill: ${makerResult.reason}`);
-        }
-        this.printStats();
-        return;
-      } catch (error: any) {
-        const reason = error?.message || 'signal_maker_entry_failed';
-        this.stats.tradesFailed++;
-        const behavior = getMarketLockBehavior(reason, config.trading.marketShortLockMs);
-        if (behavior.applyLock && behavior.lockType === 'short') {
-          this.incrementMarketRetryState(trade, marketLockKey, Date.now());
-          this.applyMarketLock(trade, marketLockKey, {
-            lockType: 'short',
-            reason,
-            lockMs: behavior.lockMs,
-          });
-        }
-        this.recordTradeLog(trade, {
-          action: 'copy_fail',
-          reason,
-          sourceAgeMs,
-          copyNotional: signalMakerDecision.candidateSizeUsd,
-        });
-        console.log(`❌ Signal maker entry failed: ${reason}`);
-        this.printStats();
-        return;
-      }
-    }
-
     if (config.trading.dryRun) {
-      const entryPrice = Number.isFinite(bestAsk) ? bestAsk : effectiveTrade.price;
+      const entryPrice = effectiveTrade.price;
       const entryShares = this.executor.calculateSharesFromNotional(copyNotional, entryPrice);
       this.recordTradeLog(trade, {
         action: 'dry_run',
         reason: 'dry_run_enabled',
         sourceAgeMs,
         copyNotional,
-        fillPrice: Number.isFinite(bestAsk) ? bestAsk : undefined,
+        fillPrice: entryPrice,
       });
       insertSimPosition({
         conditionId: trade.conditionId,

@@ -401,7 +401,6 @@ export class TradeExecutor {
   }
 
   async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
-    const PRICE_MATCH_EPSILON = 0.02;
     const sourcePrice = Number(originalTrade.price);
     const sourceResolution = await this.resolveSourceSideExecutionTarget(originalTrade);
     const fallbackResult = {
@@ -434,118 +433,22 @@ export class TradeExecutor {
       mustMatch: true,
     });
 
-    const expectedLookup = await this.getOrderbookLookup(expectedTokenId, originalTrade.market);
-    const validationChosenTokenId = expectedTokenId;
-    const validationBestBid = expectedLookup.bestBid;
-    const validationBestAsk = expectedLookup.bestAsk;
-    const validationAsksDepth = expectedLookup.asksDepth;
-    const validationPassed = expectedLookup.bestAsk != null && Math.abs(expectedLookup.bestAsk - sourcePrice) <= PRICE_MATCH_EPSILON;
-    const slippage = validationBestAsk != null && sourcePrice > 0
-      ? (validationBestAsk - sourcePrice) / sourcePrice
-      : null;
-
     const validatedTrade: Trade = {
       ...originalTrade,
-      tokenId: validationChosenTokenId,
+      tokenId: expectedTokenId,
       outcome: sourceOutcomeSide,
       outcomeName: sourceOutcomeSide,
     };
 
-    console.log('[Execution Validation]', {
-      sourcePrice,
-      chosenSide: sourceOutcomeSide,
-      chosenTokenId: validationChosenTokenId,
-      chosenBestBid: validationBestBid,
-      chosenBestAsk: validationBestAsk,
-      directAskMatches: validationPassed,
-      validationPassed,
-      validationReason: validationPassed ? 'source_side_ask_match' : 'source_side_locked',
-    });
-
-    console.log('[Execution Decision]', {
-      sourcePrice,
-      chosenSide: sourceOutcomeSide,
-      tokenId: validationChosenTokenId,
-      bestBid: validationBestBid,
-      bestAsk: validationBestAsk,
-      slippage,
-    });
-
-    if (expectedLookup.status === 'not_found') {
-      console.log('[Execution Validation]', {
-        market: originalTrade.market,
-        sourceSide: sourceOutcomeSide,
-        expectedTokenId,
-        bestAsk: validationBestAsk,
-        bestBid: validationBestBid,
-        skipReason: 'no_orderbook_on_source_side',
-      });
-      return {
-        ...fallbackResult,
-        trade: validatedTrade,
-        orderbook: null,
-        bestBid: validationBestBid,
-        bestAsk: validationBestAsk,
-        chosenTokenId: validationChosenTokenId,
-        slippage,
-        asksDepth: validationAsksDepth,
-        reason: 'no_orderbook_on_source_side',
-      };
-    }
-
-    if (validationAsksDepth === 0 || validationBestAsk == null || validationBestAsk <= 0) {
-      console.log('[Execution Validation]', {
-        market: originalTrade.market,
-        sourceSide: sourceOutcomeSide,
-        expectedTokenId,
-        bestAsk: validationBestAsk,
-        bestBid: validationBestBid,
-        skipReason: 'no_ask_on_source_side',
-      });
-      return {
-        ...fallbackResult,
-        trade: validatedTrade,
-        orderbook: expectedLookup.orderbook || null,
-        bestBid: validationBestBid,
-        bestAsk: validationBestAsk,
-        chosenTokenId: validationChosenTokenId,
-        slippage,
-        asksDepth: validationAsksDepth,
-        reason: 'no_ask_on_source_side',
-      };
-    }
-
-    if (!validationPassed) {
-      console.log('[Execution Validation]', {
-        market: originalTrade.market,
-        sourceSide: sourceOutcomeSide,
-        expectedTokenId,
-        bestAsk: validationBestAsk,
-        bestBid: validationBestBid,
-        skipReason: 'source_side_price_mismatch',
-      });
-      return {
-        ...fallbackResult,
-        trade: validatedTrade,
-        orderbook: expectedLookup.orderbook || null,
-        bestBid: validationBestBid,
-        bestAsk: validationBestAsk,
-        chosenTokenId: validationChosenTokenId,
-        slippage,
-        asksDepth: validationAsksDepth,
-        reason: 'source_side_price_mismatch',
-      };
-    }
-
     return {
       trade: validatedTrade,
-      orderbook: expectedLookup.orderbook,
-      bestBid: validationBestBid,
-      bestAsk: validationBestAsk,
-      chosenTokenId: validationChosenTokenId,
+      orderbook: null,
+      bestBid: null,
+      bestAsk: null,
+      chosenTokenId: expectedTokenId,
       outcomeSide: sourceOutcomeSide,
-      slippage,
-      asksDepth: validationAsksDepth,
+      slippage: null,
+      asksDepth: 0,
       rejected: false,
       path: 'direct_source_token',
     };
@@ -572,16 +475,15 @@ export class TradeExecutor {
     }
 
     const { sourceOutcomeSide, expectedTokenId } = sourceResolution;
-    const lookup = await this.getOrderbookLookup(expectedTokenId, trade.market);
     console.log('[Signal Precheck]', {
       sourceSide: sourceOutcomeSide,
       executionSide: sourceOutcomeSide,
       tokenId: expectedTokenId,
-      bestAsk: lookup.bestAsk,
-      bestBid: lookup.bestBid,
-      asksDepth: lookup.asksDepth,
-      bidsDepth: lookup.bidsDepth,
-      action: lookup.status === 'not_found' || lookup.bestAsk == null || lookup.bestAsk <= 0 ? 'skip' : 'continue',
+      bestAsk: null,
+      bestBid: null,
+      asksDepth: 0,
+      bidsDepth: 0,
+      action: 'continue',
     });
 
     const resolvedTrade: Trade = {
@@ -591,31 +493,12 @@ export class TradeExecutor {
       outcomeName: sourceOutcomeSide,
     };
 
-    if (lookup.status === 'not_found' || lookup.bestAsk == null || lookup.bestAsk <= 0) {
-      console.log('[Signal Precheck Skip]', {
-        reason: 'no_ask_on_source_side',
-        sourceSide: sourceOutcomeSide,
-        executionSide: sourceOutcomeSide,
-        tokenId: expectedTokenId,
-        bestAsk: lookup.bestAsk,
-        asksDepth: lookup.asksDepth,
-      });
-      return {
-        ok: false,
-        trade: resolvedTrade,
-        reason: 'no_ask_on_source_side',
-        tokenId: expectedTokenId,
-        bestAsk: lookup.bestAsk,
-        bestBid: lookup.bestBid,
-      };
-    }
-
     return {
       ok: true,
       trade: resolvedTrade,
       tokenId: expectedTokenId,
-      bestAsk: lookup.bestAsk,
-      bestBid: lookup.bestBid,
+      bestAsk: null,
+      bestBid: null,
     };
   }
 
@@ -1988,6 +1871,7 @@ export class TradeExecutor {
     copyNotionalOverride?: number
   ): Promise<CopyExecutionResult> {
     const copyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
+    const configuredOrderType = this.getConfiguredExecutionOrderType();
 
     console.log(`📈 Executing signal-triggered trade:`);
     console.log(`   Market: ${originalTrade.market}`);
@@ -1995,95 +1879,27 @@ export class TradeExecutor {
     console.log(`   Original size: ${originalTrade.size} USDC`);
     console.log(`   Token ID: ${originalTrade.tokenId}`);
     console.log(`   Copy notional: ${copyNotional} USDC`);
-
-    let lastFailureReason = 'execution_failed';
-    for (const attempt of [
-      { attempt: 1, orderType: 'FOK' as const },
-      { attempt: 2, orderType: 'FAK' as const },
-    ]) {
-      const refreshedBook = await this.refreshExecutionBook(originalTrade);
-      if (refreshedBook.bestAsk == null || refreshedBook.asksDepth === 0) {
-        console.log('[Execution Skip]', {
-          market: originalTrade.market,
-          tokenId: originalTrade.tokenId,
-          reason: 'no_ask_on_source_side',
-        });
-        throw new Error('no_ask_on_source_side');
-      }
-
-      const availableAskNotional = this.getAvailableAskNotional(refreshedBook.orderbook, copyNotional);
-      console.log('[Execution Depth Check]', {
-        copyNotional,
-        availableAskNotional,
-      });
-      if (availableAskNotional < copyNotional) {
-        console.log('[Execution Depth Check Skip]', {
-          reason: 'insufficient_source_ask_depth',
-          copyNotional,
-          availableAskNotional,
-        });
-        throw new Error('insufficient_source_ask_depth');
-      }
-
-      const priceDriftBps = this.getPriceGapBps(Number(originalTrade.price), refreshedBook.bestAsk);
-      if (priceDriftBps > config.trading.mvpMaxPriceDriftBps) {
-        console.log('[Execution Skip]', {
-          market: originalTrade.market,
-          tokenId: originalTrade.tokenId,
-          reason: 'execution_price_moved_too_far',
-          sourcePrice: originalTrade.price,
-          latestBestAsk: refreshedBook.bestAsk,
-          priceDriftBps,
-        });
-        throw new Error('execution_price_moved_too_far');
-      }
-
-      const validatedPrice = await this.validatePrice(refreshedBook.bestAsk, originalTrade.tokenId);
-      const derivedShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
-      console.log('[Execution Path]', {
-        mode: 'TAKER',
-        sourceSide: originalTrade.outcome,
-        executionSide: originalTrade.outcome,
-        tokenId: originalTrade.tokenId,
-        bestAsk: refreshedBook.bestAsk,
-        sourcePrice: originalTrade.price,
-        mustMatchSourceSide: true,
-      });
-      console.log('[Execution Plan]', {
-        sourceSide: originalTrade.outcome,
-        sourceTokenId: originalTrade.tokenId,
-        executionTokenId: originalTrade.tokenId,
-        sourcePrice: originalTrade.price,
-        latestBestAsk: refreshedBook.bestAsk,
-        chosenPrice: validatedPrice,
-        priceDriftBps,
-        copyNotional,
-        derivedShares,
-        orderType: attempt.orderType,
-      });
-
-      try {
-        return await this.executeMvpTakerAttempt(
-          originalTrade,
-          copyNotional,
-          validatedPrice,
-          derivedShares,
-          refreshedBook.bestBid,
-          refreshedBook.bestAsk,
-          attempt.orderType,
-          attempt.attempt
-        );
-      } catch (error: any) {
-        lastFailureReason = error?.message || lastFailureReason;
-        console.log('[Execution Failure]', {
-          attempt: attempt.attempt,
-          orderType: attempt.orderType,
-          reason: lastFailureReason,
-        });
-      }
-    }
-
-    throw new Error(lastFailureReason);
+    const validatedPrice = await this.validatePrice(Number(originalTrade.price), originalTrade.tokenId);
+    const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+    console.log('[Execution Plan]', {
+      sourceSide: originalTrade.outcome,
+      sourceTokenId: originalTrade.tokenId,
+      executionTokenId: originalTrade.tokenId,
+      sourcePrice: originalTrade.price,
+      latestBestAsk: null,
+      chosenPrice: validatedPrice,
+      priceDriftBps: 0,
+      copyNotional,
+      derivedShares: copyShares,
+      orderType: configuredOrderType,
+    });
+    return this.executeDirectSourceOrder(
+      originalTrade,
+      copyNotional,
+      validatedPrice,
+      copyShares,
+      configuredOrderType
+    );
   }
 
   private async refreshExecutionBook(originalTrade: Trade): Promise<{
@@ -2226,6 +2042,52 @@ export class TradeExecutor {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private getConfiguredExecutionOrderType(): 'LIMIT' | 'FOK' | 'FAK' {
+    return config.trading.orderType;
+  }
+
+  private async submitDirectSourceOrder(params: {
+    trade: Trade;
+    executionPrice: number;
+    copyNotional: number;
+    copyShares: number;
+    feeRateBps: number;
+    orderOpts: any;
+    configuredOrderType: 'LIMIT' | 'FOK' | 'FAK';
+  }): Promise<any> {
+    const { trade, executionPrice, copyNotional, copyShares, feeRateBps, orderOpts, configuredOrderType } = params;
+
+    if (configuredOrderType === 'LIMIT') {
+      return this.clobClient.createAndPostOrder(
+        {
+          tokenID: trade.tokenId,
+          price: executionPrice,
+          size: copyShares,
+          side: trade.side as Side,
+          feeRateBps,
+        },
+        orderOpts,
+        OrderType.GTC,
+        false,
+        false
+      );
+    }
+
+    const orderTypeEnum = configuredOrderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+    return this.clobClient.createAndPostMarketOrder(
+      {
+        tokenID: trade.tokenId,
+        amount: trade.side === 'BUY' ? copyNotional : copyShares,
+        price: executionPrice,
+        side: trade.side as Side,
+        feeRateBps,
+        orderType: orderTypeEnum,
+      },
+      orderOpts,
+      orderTypeEnum
+    );
+  }
+
   private logMakerFallbackEvent(
     trade: Trade,
     params: {
@@ -2289,15 +2151,12 @@ export class TradeExecutor {
     });
   }
 
-  private async executeMvpTakerAttempt(
+  private async executeDirectSourceOrder(
     originalTrade: Trade,
     copyNotional: number,
     executionPrice: number,
     copyShares: number,
-    bestBid: number | null,
-    bestAsk: number | null,
-    orderType: 'FOK' | 'FAK',
-    attempt: number
+    configuredOrderType: 'LIMIT' | 'FOK' | 'FAK',
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
@@ -2308,16 +2167,16 @@ export class TradeExecutor {
       executionSide: originalTrade.outcome,
       executionTokenId: originalTrade.tokenId,
       sourcePrice: originalTrade.price,
-      chosenBestAsk: bestAsk,
+      chosenBestAsk: null,
       copyNotional,
       derivedPrice: executionPrice,
       derivedShares: copyShares,
-      orderType,
+      orderType: configuredOrderType,
     });
 
     console.log('[Execution Attempt]', {
-      attempt,
-      orderType,
+      attempt: 1,
+      orderType: configuredOrderType,
       tokenId: originalTrade.tokenId,
       market: originalTrade.market,
       sourcePrice: originalTrade.price,
@@ -2325,23 +2184,24 @@ export class TradeExecutor {
       copyNotional,
     });
 
-    const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
-    const response = await this.clobClient.createAndPostMarketOrder(
-      {
-        tokenID: originalTrade.tokenId,
-        amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
-        price: executionPrice,
-        side: originalTrade.side as Side,
-        feeRateBps,
-        orderType: orderTypeEnum,
-      },
+    const response = await this.submitDirectSourceOrder({
+      trade: originalTrade,
+      executionPrice,
+      copyNotional,
+      copyShares,
+      feeRateBps,
       orderOpts,
-      orderTypeEnum
-    );
+      configuredOrderType,
+    });
 
     if (!response.success) {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      throw new Error(`${orderType}_failed:${errorMsg}`);
+      console.log('[Execution Failure]', {
+        attempt: 1,
+        orderType: configuredOrderType,
+        reason: errorMsg,
+      });
+      throw new Error(`${configuredOrderType}_failed:${errorMsg}`);
     }
 
     console.log('[Execution Success]', {
