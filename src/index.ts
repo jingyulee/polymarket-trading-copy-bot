@@ -708,7 +708,15 @@ class PolymarketCopyBot {
 
     const behavior = getMarketLockBehavior(params.reason, config.trading.marketShortLockMs);
     if (behavior.applyLock && behavior.lockType === 'short') {
-      if (params.incrementRetry !== false) {
+      if (behavior.softened) {
+        console.log('[Market Lock Softened]', {
+          market: trade.market || params.marketLockKey,
+          tokenId: trade.tokenId || params.marketLockKey,
+          reason: params.reason,
+          lockMs: behavior.lockMs,
+        });
+      }
+      if (params.incrementRetry !== false && behavior.incrementRetry) {
         this.incrementMarketRetryState(trade, params.marketLockKey, Date.now());
       }
       this.applyMarketLock(trade, params.marketLockKey, {
@@ -896,7 +904,7 @@ class PolymarketCopyBot {
     effectiveTrade = executionValidation.trade;
     const marketLockKey = getMarketLockKey(effectiveTrade);
     if (executionValidation.rejected) {
-      if (executionValidation.reason !== 'market_outcome_map_missing' && executionValidation.chosenTokenId) {
+      if (executionValidation.reason === 'wrong_token_side_detected' && executionValidation.chosenTokenId) {
         console.log('[Execution Validation Bypassed]', {
           market: effectiveTrade.market,
           sourcePrice: executionSourcePrice,
@@ -1020,14 +1028,30 @@ class PolymarketCopyBot {
 
     const copyNotional = this.executor.calculateCopySize(effectiveTrade.size);
     const marketLocked = config.trading.oneTradePerMarket && this.marketLocks.has(marketLockKey);
-    const signalMakerDecision = await this.shouldPlaceSignalMakerEntry({
-      trade: effectiveTrade,
-      signalConfirmation,
-      bestBid,
-      asksDepth,
-      copyNotional,
-      marketLocked,
-    });
+    const signalMakerDecision = signalConfirmation
+      ? {
+        enabled: false,
+        side: effectiveTrade.side === 'SELL' ? 'SELL' : 'BUY',
+        tokenId: effectiveTrade.tokenId,
+        candidatePrice: null,
+        candidateSizeUsd: copyNotional,
+        marketLocked,
+        reason: 'prioritize_real_execution',
+      }
+      : await this.shouldPlaceSignalMakerEntry({
+        trade: effectiveTrade,
+        signalConfirmation,
+        bestBid,
+        asksDepth,
+        copyNotional,
+        marketLocked,
+      });
+    if (signalConfirmation) {
+      console.log('[Signal Maker Entry Disabled In MVP]', {
+        market: effectiveTrade.market,
+        reason: 'prioritize_real_execution',
+      });
+    }
     if (signalMakerDecision.enabled) {
       console.log('[Signal Maker Entry Candidate]', {
         tokenId: effectiveTrade.tokenId,
@@ -1069,9 +1093,12 @@ class PolymarketCopyBot {
       console.log('[Execution Trigger MVP]', {
         market: effectiveTrade.market,
         sourcePrice: executionSourcePrice,
-        chosenSide: executionValidation?.outcomeSide || effectiveTrade.outcome,
-        tokenId: effectiveTrade.tokenId,
+        sourceSide: trade.outcome,
+        sourceTokenId: trade.tokenId,
+        executionSide: executionValidation?.outcomeSide || effectiveTrade.outcome,
+        executionTokenId: effectiveTrade.tokenId,
         copyNotional: riskTargetNotional,
+        path: executionValidation?.path || 'direct_source_token',
       });
       console.log('[Execution Trigger]', {
         key: signalKey,

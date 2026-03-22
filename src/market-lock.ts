@@ -4,6 +4,8 @@ export interface MarketLockBehavior {
   applyLock: boolean;
   lockType: MarketLockType | null;
   lockMs: number | null;
+  incrementRetry: boolean;
+  softened?: boolean;
 }
 
 const NO_LOCK_REASONS = new Set([
@@ -32,6 +34,14 @@ const STRATEGY_FILTER_SKIP_REASONS = new Set([
   'signal_pending',
 ]);
 
+const SOFT_LOCK_REASONS = new Set([
+  'no_liquidity',
+  'no_liquidity_both_sides',
+  'orderbook_not_found',
+  'execution_side_switch',
+  'order_param_build_failed',
+]);
+
 export function getMarketLockBehavior(
   skipReason: string,
   marketShortLockMs: number
@@ -41,6 +51,17 @@ export function getMarketLockBehavior(
       applyLock: false,
       lockType: null,
       lockMs: null,
+      incrementRetry: false,
+    };
+  }
+
+  if (SOFT_LOCK_REASONS.has(skipReason)) {
+    return {
+      applyLock: true,
+      lockType: 'short',
+      lockMs: Math.min(Math.max(0, marketShortLockMs), 500),
+      incrementRetry: false,
+      softened: true,
     };
   }
 
@@ -48,6 +69,7 @@ export function getMarketLockBehavior(
     applyLock: true,
     lockType: 'short',
     lockMs: marketShortLockMs,
+    incrementRetry: true,
   };
 }
 

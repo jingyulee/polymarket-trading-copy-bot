@@ -96,6 +96,17 @@ export interface ExecutionValidationResult {
   asksDepth: number;
   rejected: boolean;
   reason?: string;
+  path?: 'direct_source_token' | 'complement_token_execution';
+}
+
+interface OrderbookLookupResult {
+  tokenId: string;
+  orderbook: any | null;
+  status: 'ok' | 'not_found' | 'error';
+  bestBid: number | null;
+  bestAsk: number | null;
+  bidsDepth: number;
+  asksDepth: number;
 }
 
 export interface CopyExecutionResult {
@@ -383,9 +394,9 @@ export class TradeExecutor {
   }
 
   async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
-    const PRICE_TOLERANCE = 0.05;
+    const PRICE_MATCH_EPSILON = 0.02;
     const sourcePrice = Number(originalTrade.price);
-    const outcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
+    const defaultOutcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
     const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
     const fallbackResult = {
       trade: originalTrade,
@@ -393,7 +404,7 @@ export class TradeExecutor {
       bestBid: null,
       bestAsk: null,
       chosenTokenId: originalTrade.tokenId,
-      outcomeSide,
+      outcomeSide: defaultOutcomeSide,
       slippage: null,
       asksDepth: 0,
       rejected: true,
@@ -406,157 +417,170 @@ export class TradeExecutor {
       return fallbackResult;
     }
 
-    const [orderbookUp, orderbookDown] = await Promise.all([
-      this.getOrderbook(upTokenId),
-      this.getOrderbook(downTokenId),
+    const [upLookup, downLookup] = await Promise.all([
+      this.getOrderbookLookup(upTokenId, originalTrade.market),
+      this.getOrderbookLookup(downTokenId, originalTrade.market),
     ]);
-
-    const chosenTokenId = outcomeSide === 'UP' ? upTokenId : downTokenId;
-    const chosenOrderbook = outcomeSide === 'UP' ? orderbookUp : orderbookDown;
-    const oppositeOrderbook = outcomeSide === 'UP' ? orderbookDown : orderbookUp;
-    const bestBidValue = Number(chosenOrderbook?.bids?.[0]?.price);
-    const bestAskValue = Number(chosenOrderbook?.asks?.[0]?.price);
-    const oppositeBestBidValue = Number(oppositeOrderbook?.bids?.[0]?.price);
-    const oppositeBestAskValue = Number(oppositeOrderbook?.asks?.[0]?.price);
-    const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
-    const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
-    const oppositeBestBid = Number.isFinite(oppositeBestBidValue) ? oppositeBestBidValue : null;
-    const oppositeBestAsk = Number.isFinite(oppositeBestAskValue) ? oppositeBestAskValue : null;
-    const asksDepth = Array.isArray(chosenOrderbook?.asks) ? chosenOrderbook.asks.length : 0;
+    const normalizedOriginalTokenId = String(originalTrade.tokenId || '').trim();
+    const sourceLookup = normalizedOriginalTokenId === downTokenId
+      ? downLookup
+      : upLookup;
+    const oppositeLookup = sourceLookup.tokenId === upTokenId ? downLookup : upLookup;
+    const sourceOutcomeSide: 'UP' | 'DOWN' = sourceLookup.tokenId === upTokenId ? 'UP' : 'DOWN';
+    const oppositeOutcomeSide: 'UP' | 'DOWN' = sourceOutcomeSide === 'UP' ? 'DOWN' : 'UP';
     const complementTargetPrice = sourcePrice > 0 ? 1 - sourcePrice : null;
-    const directAskMatches = bestAsk != null && Math.abs(bestAsk - sourcePrice) <= PRICE_TOLERANCE;
-    const oppositeBidMatches = complementTargetPrice != null &&
-      oppositeBestBid != null &&
-      Math.abs(oppositeBestBid - complementTargetPrice) <= PRICE_TOLERANCE;
-    const directBidFallback = bestBid != null && Math.abs(bestBid - sourcePrice) <= PRICE_TOLERANCE;
-    const sourceTokenMatchesChosen = String(originalTrade.tokenId || '').trim() === chosenTokenId;
-    const hasNoDirectAskAndNoOppositeBid = bestAsk == null && oppositeBestBid == null;
-    const validationPassed = directAskMatches || oppositeBidMatches || directBidFallback || (sourceTokenMatchesChosen && hasNoDirectAskAndNoOppositeBid);
-    const validationReason = directAskMatches
-      ? 'direct_ask_match'
-      : oppositeBidMatches
-        ? 'opposite_bid_match'
-        : directBidFallback
-          ? 'direct_bid_fallback'
-          : (sourceTokenMatchesChosen && hasNoDirectAskAndNoOppositeBid)
-            ? 'source_token_matches_chosen_without_quotes'
-            : 'no_reasonable_price_mapping';
-    const slippage = bestAsk != null && sourcePrice > 0
-      ? (bestAsk - sourcePrice) / sourcePrice
+    const sourceAskMatches = sourceLookup.bestAsk != null && Math.abs(sourceLookup.bestAsk - sourcePrice) <= PRICE_MATCH_EPSILON;
+    const oppositeAskMatches = complementTargetPrice != null &&
+      oppositeLookup.bestAsk != null &&
+      Math.abs(oppositeLookup.bestAsk - complementTargetPrice) <= PRICE_MATCH_EPSILON;
+    const sourceHasExtremeBid = sourceLookup.bestBid != null && sourceLookup.bestBid <= 0.01;
+    const oppositeHasReasonableAsk = oppositeLookup.bestAsk != null && oppositeLookup.bestAsk > 0 && oppositeLookup.bestAsk < 1;
+
+    let selectedLookup: OrderbookLookupResult | null = null;
+    let selectedOutcomeSide: 'UP' | 'DOWN' = sourceOutcomeSide;
+    let selectedPath: 'direct_source_token' | 'complement_token_execution' = 'direct_source_token';
+    let selectionReason = 'no_viable_book';
+
+    if (sourceAskMatches) {
+      selectedLookup = sourceLookup;
+      selectedOutcomeSide = sourceOutcomeSide;
+      selectedPath = 'direct_source_token';
+      selectionReason = 'direct_book_match';
+    } else if (oppositeAskMatches) {
+      selectedLookup = oppositeLookup;
+      selectedOutcomeSide = oppositeOutcomeSide;
+      selectedPath = 'complement_token_execution';
+      selectionReason = 'book_driven_complement_execution';
+    } else if (sourceLookup.bestAsk == null && sourceHasExtremeBid && oppositeHasReasonableAsk) {
+      selectedLookup = oppositeLookup;
+      selectedOutcomeSide = oppositeOutcomeSide;
+      selectedPath = 'complement_token_execution';
+      selectionReason = 'book_driven_complement_execution';
+    }
+
+    if (selectedLookup && selectedLookup.tokenId !== sourceLookup.tokenId) {
+      console.log('[Execution Side Switched]', {
+        market: originalTrade.market,
+        sourceSide: sourceOutcomeSide,
+        sourceTokenId: sourceLookup.tokenId,
+        sourcePrice,
+        executionTokenId: selectedLookup.tokenId,
+        executionSide: selectedOutcomeSide,
+        reason: 'book_driven_complement_execution',
+        sourceBestBid: sourceLookup.bestBid,
+        sourceBestAsk: sourceLookup.bestAsk,
+        oppositeBestBid: oppositeLookup.bestBid,
+        oppositeBestAsk: oppositeLookup.bestAsk,
+      });
+    } else if (selectedLookup) {
+      console.log('[Execution Side Preserved]', {
+        market: originalTrade.market,
+        sourceSide: sourceOutcomeSide,
+        sourceTokenId: sourceLookup.tokenId,
+        sourcePrice,
+        executionTokenId: selectedLookup.tokenId,
+        executionSide: selectedOutcomeSide,
+        reason: 'direct_book_match',
+      });
+    }
+
+    const validationChosenTokenId = selectedLookup?.tokenId || sourceLookup.tokenId;
+    const validationBestBid = selectedLookup?.bestBid ?? sourceLookup.bestBid;
+    const validationBestAsk = selectedLookup?.bestAsk ?? sourceLookup.bestAsk;
+    const validationAsksDepth = selectedLookup?.asksDepth ?? sourceLookup.asksDepth;
+    const validationPassed = Boolean(selectedLookup);
+    const slippage = validationBestAsk != null && sourcePrice > 0
+      ? (validationBestAsk - sourcePrice) / sourcePrice
       : null;
 
     const validatedTrade: Trade = {
       ...originalTrade,
-      tokenId: chosenTokenId,
-      outcome: outcomeSide,
-      outcomeName: outcomeSide,
+      tokenId: validationChosenTokenId,
+      outcome: selectedOutcomeSide,
+      outcomeName: selectedOutcomeSide,
     };
 
     console.log('[Execution Validation]', {
       sourcePrice,
-      chosenSide: outcomeSide,
-      chosenTokenId,
-      chosenBestBid: bestBid,
-      chosenBestAsk: bestAsk,
-      oppositeBestBid,
-      oppositeBestAsk,
+      chosenSide: selectedOutcomeSide,
+      chosenTokenId: validationChosenTokenId,
+      chosenBestBid: validationBestBid,
+      chosenBestAsk: validationBestAsk,
+      oppositeBestBid: selectedLookup?.tokenId === oppositeLookup.tokenId ? sourceLookup.bestBid : oppositeLookup.bestBid,
+      oppositeBestAsk: selectedLookup?.tokenId === oppositeLookup.tokenId ? sourceLookup.bestAsk : oppositeLookup.bestAsk,
       complementTargetPrice,
-      directAskMatches,
-      oppositeBidMatches,
-      directBidFallback,
+      directAskMatches: sourceAskMatches,
+      oppositeBidMatches: false,
+      directBidFallback: false,
       validationPassed,
-      validationReason,
+      validationReason: selectionReason,
     });
 
     console.log('[Execution Decision]', {
       sourcePrice,
-      chosenSide: outcomeSide,
-      tokenId: chosenTokenId,
-      bestBid,
-      bestAsk,
+      chosenSide: selectedOutcomeSide,
+      tokenId: validationChosenTokenId,
+      bestBid: validationBestBid,
+      bestAsk: validationBestAsk,
       slippage,
     });
 
-    if (!validationPassed) {
+    const bothBooksMissing = upLookup.status === 'not_found' && downLookup.status === 'not_found';
+    const anyBookMissing = upLookup.status === 'not_found' || downLookup.status === 'not_found';
+
+    if (!validationPassed && bothBooksMissing) {
       return {
         ...fallbackResult,
         trade: validatedTrade,
-        orderbook: chosenOrderbook,
-        bestBid,
-        bestAsk,
-        chosenTokenId,
+        orderbook: null,
+        bestBid: validationBestBid,
+        bestAsk: validationBestAsk,
+        chosenTokenId: validationChosenTokenId,
         slippage,
-        asksDepth,
-        reason: 'wrong_token_side_detected',
+        asksDepth: validationAsksDepth,
+        reason: 'orderbook_not_found',
       };
     }
 
-    if (asksDepth === 0) {
+    if (!validationPassed && anyBookMissing) {
       return {
         ...fallbackResult,
         trade: validatedTrade,
-        orderbook: chosenOrderbook,
-        bestBid,
-        bestAsk,
-        chosenTokenId,
+        orderbook: null,
+        bestBid: validationBestBid,
+        bestAsk: validationBestAsk,
+        chosenTokenId: validationChosenTokenId,
         slippage,
-        asksDepth,
+        asksDepth: validationAsksDepth,
+        reason: 'orderbook_not_found',
+      };
+    }
+
+    if (!selectedLookup || validationAsksDepth === 0 || validationBestAsk == null || validationBestAsk <= 0) {
+      return {
+        ...fallbackResult,
+        trade: validatedTrade,
+        orderbook: selectedLookup?.orderbook || null,
+        bestBid: validationBestBid,
+        bestAsk: validationBestAsk,
+        chosenTokenId: validationChosenTokenId,
+        slippage,
+        asksDepth: validationAsksDepth,
         reason: 'no_liquidity',
-      };
-    }
-
-    if (bestAsk == null || bestAsk <= 0) {
-      return {
-        ...fallbackResult,
-        trade: validatedTrade,
-        orderbook: chosenOrderbook,
-        bestBid,
-        bestAsk,
-        chosenTokenId,
-        slippage,
-        asksDepth,
-        reason: 'no_ask_price',
-      };
-    }
-
-    if (slippage == null || slippage > 0.001) {
-      return {
-        ...fallbackResult,
-        trade: validatedTrade,
-        orderbook: chosenOrderbook,
-        bestBid,
-        bestAsk,
-        chosenTokenId,
-        slippage,
-        asksDepth,
-        reason: 'slippage_too_high',
-      };
-    }
-
-    if (bestBid != null && bestBid < 0.01 && sourcePrice > 0.9) {
-      return {
-        ...fallbackResult,
-        trade: validatedTrade,
-        orderbook: chosenOrderbook,
-        bestBid,
-        bestAsk,
-        chosenTokenId,
-        slippage,
-        asksDepth,
-        reason: 'wrong_orderbook_side',
       };
     }
 
     return {
       trade: validatedTrade,
-      orderbook: chosenOrderbook,
-      bestBid,
-      bestAsk,
-      chosenTokenId,
-      outcomeSide,
+      orderbook: selectedLookup.orderbook,
+      bestBid: validationBestBid,
+      bestAsk: validationBestAsk,
+      chosenTokenId: validationChosenTokenId,
+      outcomeSide: selectedOutcomeSide,
       slippage,
-      asksDepth,
+      asksDepth: validationAsksDepth,
       rejected: false,
+      path: selectedPath,
     };
   }
 
@@ -968,8 +992,75 @@ export class TradeExecutor {
       const orderbook = await this.clobClient.getOrderBook(tokenId);
       return this.setOrderbookCache(tokenId, orderbook, 'fetch');
     } catch (error: any) {
+      if (this.isOrderbookNotFoundError(error)) {
+        console.log('[Orderbook Not Found]', {
+          tokenId,
+          source: 'clob_book',
+          reason: 'token_not_tradeable_on_current_clob',
+        });
+        return null;
+      }
       console.log(`⚠️  Could not fetch orderbook for ${tokenId}: ${error?.message || 'Unknown error'}`);
       return null;
+    }
+  }
+
+  private isOrderbookNotFoundError(error: any): boolean {
+    const status = Number(error?.response?.status);
+    const message = String(error?.response?.data?.error || error?.response?.data?.message || error?.message || '');
+    return status === 404 || message.includes('No orderbook exists for the requested token id');
+  }
+
+  private async getOrderbookLookup(tokenId: string, market?: string): Promise<OrderbookLookupResult> {
+    const cached = this.getFreshOrderbookCache(tokenId);
+    if (cached) {
+      const top = this.getTopOfBook({ bids: cached.bids, asks: cached.asks });
+      return {
+        tokenId,
+        orderbook: { bids: cached.bids, asks: cached.asks },
+        status: 'ok',
+        ...top,
+      };
+    }
+
+    try {
+      const orderbook = await this.clobClient.getOrderBook(tokenId);
+      const normalized = this.setOrderbookCache(tokenId, orderbook, 'execution_fetch');
+      const payload = { bids: normalized.bids, asks: normalized.asks };
+      return {
+        tokenId,
+        orderbook: payload,
+        status: 'ok',
+        ...this.getTopOfBook(payload),
+      };
+    } catch (error: any) {
+      if (this.isOrderbookNotFoundError(error)) {
+        console.log('[Orderbook Not Found]', {
+          market: market || null,
+          tokenId,
+          source: 'clob_book',
+          reason: 'token_not_tradeable_on_current_clob',
+        });
+        return {
+          tokenId,
+          orderbook: null,
+          status: 'not_found',
+          bestBid: null,
+          bestAsk: null,
+          bidsDepth: 0,
+          asksDepth: 0,
+        };
+      }
+      console.log(`⚠️  Could not fetch orderbook for ${tokenId}: ${error?.message || 'Unknown error'}`);
+      return {
+        tokenId,
+        orderbook: null,
+        status: 'error',
+        bestBid: null,
+        bestAsk: null,
+        bidsDepth: 0,
+        asksDepth: 0,
+      };
     }
   }
 
@@ -1035,9 +1126,21 @@ export class TradeExecutor {
       cacheExpired,
     });
 
-    const orderbook = await this.clobClient.getOrderBook(tokenId);
-    const normalized = this.setOrderbookCache(tokenId, orderbook, 'execution_fetch');
-    return { bids: normalized.bids, asks: normalized.asks };
+    try {
+      const orderbook = await this.clobClient.getOrderBook(tokenId);
+      const normalized = this.setOrderbookCache(tokenId, orderbook, 'execution_fetch');
+      return { bids: normalized.bids, asks: normalized.asks };
+    } catch (error: any) {
+      if (this.isOrderbookNotFoundError(error)) {
+        console.log('[Orderbook Not Found]', {
+          tokenId,
+          source: 'clob_book',
+          reason: 'token_not_tradeable_on_current_clob',
+        });
+        throw new Error('orderbook_not_found');
+      }
+      throw error;
+    }
   }
 
   async prewarmOrderbooks(
@@ -1840,22 +1943,23 @@ export class TradeExecutor {
         throw new Error('wrong_orderbook_side');
       }
 
-      const spread = bestBid != null ? bestAsk - bestBid : Number.POSITIVE_INFINITY;
       const slippage = Number(originalTrade.price) > 0
         ? (bestAsk - Number(originalTrade.price)) / Number(originalTrade.price)
         : null;
 
-      if (spread <= 0.002) {
-        if (slippage == null || slippage > 0.001) {
-          throw new Error('slippage_too_high');
-        }
-        return this.executeSignalTakerOrder(originalTrade, copyNotional, bestAsk, bestBid, bestAsk, slippage);
+      if (slippage == null || slippage > 0.001) {
+        throw new Error('slippage_too_high');
       }
 
-      if (bestBid == null) {
-        throw new Error('invalid_orderbook');
+      try {
+        return this.executeSignalTakerOrder(originalTrade, copyNotional, bestAsk, bestBid, bestAsk, slippage);
+      } catch (error: any) {
+        if (bestBid == null) {
+          throw error;
+        }
+        console.log(`⚠️  Taker path failed, attempting maker fallback: ${error?.message || 'Unknown error'}`);
+        return this.executeSignalMakerOrder(originalTrade, copyNotional, bestBid, bestAsk, slippage);
       }
-      return this.executeSignalMakerOrder(originalTrade, copyNotional, bestBid, bestAsk, slippage);
     });
   }
 
@@ -2046,43 +2150,63 @@ export class TradeExecutor {
       side: 'BUY',
     });
 
-    console.log('[Signal Taker Attempt]', {
-      tokenId: originalTrade.tokenId,
-      market: originalTrade.market,
-      side: originalTrade.side,
-      sourcePrice: originalTrade.price,
-      executionPrice: validatedPrice,
-      orderType: 'FAK',
-      copyNotional,
-    });
+    for (const orderType of ['FOK', 'FAK'] as const) {
+      console.log('[Order Params Build]', {
+        market: originalTrade.market,
+        executionSide: originalTrade.outcome,
+        executionTokenId: originalTrade.tokenId,
+        sourcePrice: originalTrade.price,
+        chosenBestAsk: bestAsk,
+        copyNotional,
+        derivedPrice: validatedPrice,
+        derivedShares: copyShares,
+        orderType,
+      });
 
-    const response = await this.clobClient.createAndPostMarketOrder(
-      {
-        tokenID: originalTrade.tokenId,
-        amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
-        price: validatedPrice,
-        side: originalTrade.side as Side,
-        feeRateBps,
-        orderType: OrderType.FAK,
-      },
-      orderOpts,
-      OrderType.FAK
-    );
+      console.log('[Signal Taker Attempt]', {
+        tokenId: originalTrade.tokenId,
+        market: originalTrade.market,
+        side: originalTrade.side,
+        sourcePrice: originalTrade.price,
+        executionPrice: validatedPrice,
+        orderType,
+        copyNotional,
+      });
 
-    if (!response.success) {
+      const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+      const response = await this.clobClient.createAndPostMarketOrder(
+        {
+          tokenID: originalTrade.tokenId,
+          amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
+          price: validatedPrice,
+          side: originalTrade.side as Side,
+          feeRateBps,
+          orderType: orderTypeEnum,
+        },
+        orderOpts,
+        orderTypeEnum
+      );
+
+      if (response.success) {
+        console.log(`✅ ${orderType} order executed: ${response.orderID}`);
+        return {
+          orderId: response.orderID,
+          copyNotional,
+          copyShares,
+          price: validatedPrice,
+          side: originalTrade.side,
+          tokenId: originalTrade.tokenId,
+        };
+      }
+
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      throw new Error(`FAK_failed:${errorMsg}`);
+      console.log(`❌ ${orderType} order failed: ${errorMsg}`);
+      if (orderType === 'FAK') {
+        throw new Error(`FAK_failed:${errorMsg}`);
+      }
     }
 
-    console.log(`✅ FAK order executed: ${response.orderID}`);
-    return {
-      orderId: response.orderID,
-      copyNotional,
-      copyShares,
-      price: validatedPrice,
-      side: originalTrade.side,
-      tokenId: originalTrade.tokenId,
-    };
+    throw new Error('order_param_build_failed');
   }
 
   private async executeSignalMakerOrder(
@@ -2116,6 +2240,18 @@ export class TradeExecutor {
       slippage,
       tokenId: originalTrade.tokenId,
       side: 'BUY',
+    });
+
+    console.log('[Order Params Build]', {
+      market: originalTrade.market,
+      executionSide: originalTrade.outcome,
+      executionTokenId: originalTrade.tokenId,
+      sourcePrice: originalTrade.price,
+      chosenBestAsk: bestAsk,
+      copyNotional,
+      derivedPrice: validatedPrice,
+      derivedShares: copyShares,
+      orderType: 'GTC',
     });
 
     const response = await this.clobClient.createAndPostOrder(
