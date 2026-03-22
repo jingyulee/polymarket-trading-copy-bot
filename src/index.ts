@@ -7,7 +7,7 @@ import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
 import { applyFilters, applyLightweightFilters, getMarketLockKey } from './filter.js';
 import { classifyCryptoMarket } from './crypto-market.js';
-import { getMarketLockBehavior, type MarketLockType } from './market-lock.js';
+import { getMarketLockBehavior, isStrategyFilterSkipReason, type MarketLockType } from './market-lock.js';
 import {
   getSkipStatsByWindow,
   getSessionStats,
@@ -574,6 +574,14 @@ class PolymarketCopyBot {
         lockType: 'short',
         reason: params.reason,
         lockMs: behavior.lockMs,
+      });
+    }
+
+    if (isStrategyFilterSkipReason(params.reason)) {
+      console.log('[Strategy Filter Skip]', {
+        reason: params.reason,
+        market: trade.market || params.marketLockKey,
+        tokenId: trade.tokenId || params.marketLockKey,
       });
     }
 

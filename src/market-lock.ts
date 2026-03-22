@@ -10,6 +10,17 @@ const NO_LOCK_REASONS = new Set([
   'market_locked',
   'market_short_locked',
   'market_retry_exhausted',
+  'source_price_out_of_range',
+  'source_trade_usd_too_small',
+  'non_crypto_market',
+  'stale_trade',
+]);
+
+const STRATEGY_FILTER_SKIP_REASONS = new Set([
+  'source_price_out_of_range',
+  'source_trade_usd_too_small',
+  'non_crypto_market',
+  'stale_trade',
 ]);
 
 export function getMarketLockBehavior(
@@ -29,4 +40,8 @@ export function getMarketLockBehavior(
     lockType: 'short',
     lockMs: marketShortLockMs,
   };
+}
+
+export function isStrategyFilterSkipReason(skipReason: string): boolean {
+  return STRATEGY_FILTER_SKIP_REASONS.has(skipReason);
 }
