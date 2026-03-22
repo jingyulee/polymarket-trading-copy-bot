@@ -970,7 +970,11 @@ class PolymarketCopyBot {
       return;
     }
     if (executionValidation.rejected) {
-      if (executionValidation.reason === 'wrong_token_side_detected' && executionValidation.chosenTokenId) {
+      if (
+        (executionValidation.reason === 'wrong_token_side_detected' ||
+          executionValidation.reason === 'no_ask_on_source_side') &&
+        executionValidation.chosenTokenId
+      ) {
         console.log('[Execution Validation Bypassed]', {
           market: effectiveTrade.market,
           sourcePrice: executionSourcePrice,

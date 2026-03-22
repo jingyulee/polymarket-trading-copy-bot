@@ -586,17 +586,11 @@ export class TradeExecutor {
       outcomeName: sourceOutcomeSide,
     };
 
-    if (lookup.status === 'not_found' || lookup.bestAsk == null || lookup.bestAsk <= 0) {
-      console.log('[Signal Precheck Skip]', {
-        reason: 'no_ask_on_source_side',
-        sourceSide: sourceOutcomeSide,
-        tokenId: expectedTokenId,
-        bestAsk: lookup.bestAsk,
-      });
+    if (lookup.status === 'not_found') {
       return {
         ok: false,
         trade: resolvedTrade,
-        reason: 'no_ask_on_source_side',
+        reason: 'no_orderbook_on_source_side',
         tokenId: expectedTokenId,
         bestAsk: lookup.bestAsk,
         bestBid: lookup.bestBid,
@@ -1996,12 +1990,15 @@ export class TradeExecutor {
     ]) {
       const refreshedBook = await this.refreshExecutionBook(originalTrade);
       if (refreshedBook.bestAsk == null || refreshedBook.asksDepth === 0) {
-        console.log('[Execution Skip]', {
-          market: originalTrade.market,
-          tokenId: originalTrade.tokenId,
-          reason: 'no_ask_on_source_side',
-        });
-        throw new Error(attempt.attempt === 1 ? 'no_ask_on_source_side' : 'no_liquidity');
+        if (attempt.attempt === 1) {
+          return this.executeSourceSideMakerFallback(
+            originalTrade,
+            copyNotional,
+            refreshedBook.bestBid,
+            refreshedBook.bestAsk
+          );
+        }
+        throw new Error('maker_unfilled');
       }
 
       const availableAskNotional = this.getAvailableAskNotional(refreshedBook.orderbook, copyNotional);
@@ -2033,6 +2030,15 @@ export class TradeExecutor {
 
       const validatedPrice = await this.validatePrice(refreshedBook.bestAsk, originalTrade.tokenId);
       const derivedShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+      console.log('[Execution Path]', {
+        mode: 'TAKER',
+        sourceSide: originalTrade.outcome,
+        executionSide: originalTrade.outcome,
+        tokenId: originalTrade.tokenId,
+        bestAsk: refreshedBook.bestAsk,
+        sourcePrice: originalTrade.price,
+        mustMatchSourceSide: true,
+      });
       console.log('[Execution Plan]', {
         sourceSide: originalTrade.outcome,
         sourceTokenId: originalTrade.tokenId,
@@ -2068,6 +2074,145 @@ export class TradeExecutor {
     }
 
     throw new Error(lastFailureReason);
+  }
+
+  private async executeSourceSideMakerFallback(
+    originalTrade: Trade,
+    copyNotional: number,
+    bestBid: number | null,
+    bestAsk: number | null
+  ): Promise<CopyExecutionResult> {
+    await this.validateBalance(copyNotional, originalTrade.tokenId);
+
+    const baseMakerPrice = bestBid != null && bestBid > 0
+      ? bestBid
+      : Number(originalTrade.price);
+    const rawMakerPrice = Math.min(baseMakerPrice, Number(originalTrade.price));
+    if (!Number.isFinite(rawMakerPrice) || rawMakerPrice <= 0) {
+      throw new Error('maker_submit_failed');
+    }
+
+    const makerPrice = await this.validatePrice(rawMakerPrice, originalTrade.tokenId);
+    const copyShares = this.calculateSharesFromNotional(copyNotional, makerPrice);
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
+    const ttlMs = 3000;
+
+    console.log('[Execution Path]', {
+      mode: 'MAKER_FALLBACK',
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
+      tokenId: originalTrade.tokenId,
+      bestAsk,
+      bestBid,
+      sourcePrice: originalTrade.price,
+      makerPrice,
+      ttlMs,
+      mustMatchSourceSide: true,
+    });
+
+    console.log('[Order Params Build]', {
+      market: originalTrade.market,
+      executionSide: originalTrade.outcome,
+      executionTokenId: originalTrade.tokenId,
+      sourcePrice: originalTrade.price,
+      chosenBestAsk: bestAsk,
+      copyNotional,
+      derivedPrice: makerPrice,
+      derivedShares: copyShares,
+      orderType: 'GTC',
+    });
+
+    const response = await this.clobClient.createAndPostOrder(
+      {
+        tokenID: originalTrade.tokenId,
+        price: makerPrice,
+        size: copyShares,
+        side: originalTrade.side as Side,
+        feeRateBps,
+      },
+      orderOpts,
+      OrderType.GTC,
+      false,
+      true
+    );
+
+    if (!response.success) {
+      const errorMsg = response.errorMsg || response.error || 'Unknown error';
+      console.log('[Execution Failure]', {
+        attempt: 1,
+        orderType: 'GTC',
+        reason: `maker_submit_failed:${errorMsg}`,
+      });
+      throw new Error(`maker_submit_failed:${errorMsg}`);
+    }
+
+    const orderId = response.orderID;
+    console.log('[Maker Order Submitted]', {
+      market: originalTrade.market,
+      tokenId: originalTrade.tokenId,
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
+      makerPrice,
+      copyNotional,
+      ttlMs,
+    });
+
+    const deadline = Date.now() + ttlMs;
+    let lastMatched = 0;
+    let resolvedPrice = makerPrice;
+
+    while (Date.now() < deadline) {
+      await this.sleep(Math.min(500, Math.max(100, deadline - Date.now())));
+      try {
+        const order = await this.clobClient.getOrder(orderId);
+        const matched = parseFloat(order?.size_matched || '0');
+        const price = parseFloat(order?.price || makerPrice.toString());
+        lastMatched = Number.isFinite(matched) ? matched : lastMatched;
+        resolvedPrice = Number.isFinite(price) ? price : resolvedPrice;
+        if (lastMatched > 0) {
+          const filledNotional = lastMatched * resolvedPrice;
+          console.log('[Maker Order Filled]', {
+            market: originalTrade.market,
+            tokenId: originalTrade.tokenId,
+            filledShares: lastMatched,
+            filledNotional,
+            sourceSide: originalTrade.outcome,
+            executionSide: originalTrade.outcome,
+          });
+          return {
+            orderId,
+            copyNotional: filledNotional,
+            copyShares: lastMatched,
+            price: resolvedPrice,
+            side: originalTrade.side,
+            tokenId: originalTrade.tokenId,
+          };
+        }
+      } catch (error: any) {
+        console.log(`   Maker fallback poll failed: ${error?.message || 'Unknown error'}`);
+      }
+    }
+
+    console.log('[Maker Order Timeout]', {
+      market: originalTrade.market,
+      tokenId: originalTrade.tokenId,
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
+      ttlMs,
+    });
+    try {
+      await this.clobClient.cancelOrder({ orderID: orderId });
+      console.log('[Maker Order Cancelled]', {
+        market: originalTrade.market,
+        tokenId: originalTrade.tokenId,
+        orderId,
+      });
+    } catch (error: any) {
+      console.log(`   Maker fallback cancel failed: ${error?.message || 'Unknown error'}`);
+    }
+
+    throw new Error('maker_unfilled');
   }
 
   private async refreshExecutionBook(originalTrade: Trade): Promise<{
