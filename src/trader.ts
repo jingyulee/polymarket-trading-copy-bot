@@ -383,6 +383,7 @@ export class TradeExecutor {
   }
 
   async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
+    const WRONG_SIDE_PRICE_TOLERANCE = 0.05;
     const sourcePrice = Number(originalTrade.price);
     const outcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
     const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
@@ -412,11 +413,24 @@ export class TradeExecutor {
 
     const chosenTokenId = outcomeSide === 'UP' ? upTokenId : downTokenId;
     const chosenOrderbook = outcomeSide === 'UP' ? orderbookUp : orderbookDown;
+    const oppositeOrderbook = outcomeSide === 'UP' ? orderbookDown : orderbookUp;
     const bestBidValue = Number(chosenOrderbook?.bids?.[0]?.price);
     const bestAskValue = Number(chosenOrderbook?.asks?.[0]?.price);
+    const oppositeBestBidValue = Number(oppositeOrderbook?.bids?.[0]?.price);
+    const oppositeBestAskValue = Number(oppositeOrderbook?.asks?.[0]?.price);
     const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
     const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
+    const oppositeBestBid = Number.isFinite(oppositeBestBidValue) ? oppositeBestBidValue : null;
+    const oppositeBestAsk = Number.isFinite(oppositeBestAskValue) ? oppositeBestAskValue : null;
     const asksDepth = Array.isArray(chosenOrderbook?.asks) ? chosenOrderbook.asks.length : 0;
+    const complementTargetPrice = sourcePrice > 0 ? 1 - sourcePrice : null;
+    const directAskMatches = bestAsk != null && Math.abs(bestAsk - sourcePrice) <= WRONG_SIDE_PRICE_TOLERANCE;
+    const complementAskMatches = complementTargetPrice != null &&
+      oppositeBestAsk != null &&
+      Math.abs(oppositeBestAsk - complementTargetPrice) <= WRONG_SIDE_PRICE_TOLERANCE;
+    const complementBidMatches = complementTargetPrice != null &&
+      oppositeBestBid != null &&
+      Math.abs(oppositeBestBid - complementTargetPrice) <= WRONG_SIDE_PRICE_TOLERANCE;
     const slippage = bestAsk != null && sourcePrice > 0
       ? (bestAsk - sourcePrice) / sourcePrice
       : null;
@@ -430,9 +444,16 @@ export class TradeExecutor {
 
     console.log('[Execution Validation]', {
       sourcePrice,
-      bestBid,
+      chosenSide: outcomeSide,
       chosenTokenId,
-      outcomeSide,
+      chosenBestBid: bestBid,
+      chosenBestAsk: bestAsk,
+      oppositeBestBid,
+      oppositeBestAsk,
+      complementTargetPrice,
+      directAskMatches,
+      complementAskMatches,
+      complementBidMatches,
     });
 
     console.log('[Execution Decision]', {
@@ -444,7 +465,7 @@ export class TradeExecutor {
       slippage,
     });
 
-    if (bestBid == null || Math.abs(bestBid - sourcePrice) > 0.1) {
+    if (!directAskMatches && !complementAskMatches && !complementBidMatches) {
       return {
         ...fallbackResult,
         trade: validatedTrade,
