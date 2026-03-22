@@ -1939,11 +1939,8 @@ export class TradeExecutor {
     copyNotionalOverride?: number
   ): Promise<CopyExecutionResult> {
     const initialCopyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
-    const configuredOrderType = this.getConfiguredExecutionOrderType();
     const openOrderKey = this.getOpenOrderKey(originalTrade);
-    const existingOpenOrder = configuredOrderType === 'LIMIT'
-      ? this.activeOpenOrders.get(openOrderKey)
-      : undefined;
+    const existingOpenOrder = this.activeOpenOrders.get(openOrderKey);
 
     if (existingOpenOrder) {
       console.log('[Open Order Skip]', {
@@ -1958,8 +1955,20 @@ export class TradeExecutor {
       throw new Error('SKIP:market_order_already_open');
     }
 
+    const orderbookLookup = await this.getOrderbookLookup(originalTrade.tokenId, originalTrade.market);
+    if (orderbookLookup.status === 'not_found') {
+      console.log('[Execution Skip]', {
+        market: originalTrade.market,
+        tokenId: originalTrade.tokenId,
+        reason: 'orderbook_not_found',
+      });
+      throw new Error('SKIP:orderbook_not_found');
+    }
+
     const pricePlan = await this.buildSignalExecutionPricePlan(originalTrade.tokenId, Number(originalTrade.price));
-    const executionPrice = pricePlan.normalizedExecutionPrice;
+    const executionPrice = Number(originalTrade.price) >= 0.99
+      ? this.normalizePriceDownToTick(0.99, pricePlan.tickSize)
+      : pricePlan.normalizedExecutionPrice;
     let adjustedCopyNotional = initialCopyNotional;
     let adjustedCopyShares = this.calculateSharesFromNotional(adjustedCopyNotional, executionPrice);
     const minSizeAdjusted = adjustedCopyShares < MIN_SHARES;
@@ -1993,14 +2002,14 @@ export class TradeExecutor {
       adjustedNotional: adjustedCopyNotional,
       adjustedShares: adjustedCopyShares,
       reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
-      orderType: configuredOrderType,
+      phase: 'taker_first',
+      orderType: 'FOK',
     });
     return this.executeDirectSourceOrder(
       originalTrade,
       adjustedCopyNotional,
       executionPrice,
       adjustedCopyShares,
-      configuredOrderType,
       minSizeAdjusted,
       pricePlan
     );
@@ -2418,7 +2427,6 @@ export class TradeExecutor {
     copyNotional: number,
     executionPrice: number,
     copyShares: number,
-    configuredOrderType: 'LIMIT' | 'FOK' | 'FAK',
     minSizeAdjusted: boolean,
     pricePlan: {
       pricingMode: 'source_trade_price' | 'fixed_signal_price_fallback';
@@ -2434,6 +2442,7 @@ export class TradeExecutor {
     const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
     console.log('[Order Params Build]', {
       market: originalTrade.market,
+      phase: 'taker_first',
       pricingMode: pricePlan.pricingMode,
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
@@ -2449,15 +2458,16 @@ export class TradeExecutor {
       adjustedNotional: copyNotional,
       adjustedShares: copyShares,
       reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
-      orderType: configuredOrderType,
+      orderType: 'FOK',
     });
 
     console.log('[Execution Attempt]', {
       attempt: 1,
+      phase: 'taker_first',
       pricingMode: pricePlan.pricingMode,
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
-      orderType: configuredOrderType,
+      orderType: 'FOK',
       tokenId: originalTrade.tokenId,
       market: originalTrade.market,
       rawSourcePrice: pricePlan.rawSourcePrice,
@@ -2471,42 +2481,140 @@ export class TradeExecutor {
       reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
     });
 
-    const response = await this.submitDirectSourceOrder({
+    const takerResponse = await this.submitDirectSourceOrder({
       trade: originalTrade,
       executionPrice,
       copyNotional,
       copyShares,
       feeRateBps,
       orderOpts,
-      configuredOrderType,
+      configuredOrderType: 'FOK',
     });
 
-    if (!response.success) {
-      const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      console.log('[Execution Failure]', {
-        attempt: 1,
-        orderType: configuredOrderType,
-        reason: errorMsg,
+    if (takerResponse.success) {
+      console.log('[Execution Success]', {
+        tokenId: originalTrade.tokenId,
+        phase: 'taker_first',
+        sourceSide: originalTrade.outcome,
+        executionSide: originalTrade.outcome,
+        rawSourcePrice: pricePlan.rawSourcePrice,
+        normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+        tickSize: pricePlan.tickSize,
+        roundingApplied: pricePlan.roundingApplied,
+        pricingMode: pricePlan.pricingMode,
+        side: originalTrade.outcome,
+        price: executionPrice,
+        shares: copyShares,
+        notional: copyNotional,
+        adjustedNotional: copyNotional,
+        adjustedShares: copyShares,
+        reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
       });
-      throw new Error(`${configuredOrderType}_failed:${errorMsg}`);
+      return {
+        orderId: takerResponse.orderID,
+        copyNotional,
+        copyShares,
+        price: executionPrice,
+        side: originalTrade.side,
+        tokenId: originalTrade.tokenId,
+      };
     }
 
-    if (configuredOrderType === 'LIMIT') {
-      const responseStatus = String(response.status || '').toUpperCase();
-      if (!this.isTerminalFilledStatus(responseStatus)) {
-        this.registerActiveOpenOrder({
-          key: this.getOpenOrderKey(originalTrade),
-          trade: originalTrade,
-          orderId: response.orderID,
-          executionPrice,
-          shares: copyShares,
-          notional: copyNotional,
-        });
-      }
+    const takerErrorMsg = takerResponse.errorMsg || takerResponse.error || 'Unknown error';
+    console.log('[Execution Failure]', {
+      attempt: 1,
+      phase: 'taker_first',
+      orderType: 'FOK',
+      reason: takerErrorMsg,
+    });
+
+    console.log('[Execution Fallback]', {
+      phase: 'short_gtc_fallback',
+      orderType: 'LIMIT',
+      ttlMs: config.trading.orderTtlMs,
+      market: originalTrade.market,
+      tokenId: originalTrade.tokenId,
+      executionPrice,
+    });
+
+    console.log('[Order Params Build]', {
+      market: originalTrade.market,
+      phase: 'short_gtc_fallback',
+      pricingMode: pricePlan.pricingMode,
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
+      executionTokenId: originalTrade.tokenId,
+      rawSourcePrice: pricePlan.rawSourcePrice,
+      normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+      tickSize: pricePlan.tickSize,
+      roundingApplied: pricePlan.roundingApplied,
+      chosenBestAsk: null,
+      copyNotional,
+      derivedPrice: executionPrice,
+      derivedShares: copyShares,
+      adjustedNotional: copyNotional,
+      adjustedShares: copyShares,
+      reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
+      orderType: 'LIMIT',
+    });
+
+    console.log('[Execution Attempt]', {
+      attempt: 2,
+      phase: 'short_gtc_fallback',
+      pricingMode: pricePlan.pricingMode,
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
+      orderType: 'LIMIT',
+      tokenId: originalTrade.tokenId,
+      market: originalTrade.market,
+      rawSourcePrice: pricePlan.rawSourcePrice,
+      normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+      tickSize: pricePlan.tickSize,
+      roundingApplied: pricePlan.roundingApplied,
+      executionPrice,
+      copyNotional,
+      adjustedNotional: copyNotional,
+      adjustedShares: copyShares,
+      reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
+      ttlMs: config.trading.orderTtlMs,
+    });
+
+    const fallbackResponse = await this.submitDirectSourceOrder({
+      trade: originalTrade,
+      executionPrice,
+      copyNotional,
+      copyShares,
+      feeRateBps,
+      orderOpts,
+      configuredOrderType: 'LIMIT',
+    });
+
+    if (!fallbackResponse.success) {
+      const fallbackErrorMsg = fallbackResponse.errorMsg || fallbackResponse.error || 'Unknown error';
+      console.log('[Execution Failure]', {
+        attempt: 2,
+        phase: 'short_gtc_fallback',
+        orderType: 'LIMIT',
+        reason: fallbackErrorMsg,
+      });
+      throw new Error(`LIMIT_failed:${fallbackErrorMsg}`);
+    }
+
+    const fallbackStatus = String(fallbackResponse.status || '').toUpperCase();
+    if (!this.isTerminalFilledStatus(fallbackStatus)) {
+      this.registerActiveOpenOrder({
+        key: this.getOpenOrderKey(originalTrade),
+        trade: originalTrade,
+        orderId: fallbackResponse.orderID,
+        executionPrice,
+        shares: copyShares,
+        notional: copyNotional,
+      });
     }
 
     console.log('[Execution Success]', {
       tokenId: originalTrade.tokenId,
+      phase: 'short_gtc_fallback',
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
       rawSourcePrice: pricePlan.rawSourcePrice,
@@ -2523,7 +2631,7 @@ export class TradeExecutor {
       reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
     });
     return {
-      orderId: response.orderID,
+      orderId: fallbackResponse.orderID,
       copyNotional,
       copyShares,
       price: executionPrice,

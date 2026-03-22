@@ -77,7 +77,7 @@ export const config = {
     singleSignalTriggerUsd: parseNumber(process.env.SINGLE_SIGNAL_TRIGGER_USD, 20),
     signalRequireBuyOnly: parseBoolean(process.env.SIGNAL_REQUIRE_BUY_ONLY, true),
     executionFixedPrice: parseNumber(process.env.EXECUTION_FIXED_PRICE, 0.99),
-    orderTtlMs: parseNumber(process.env.ORDER_TTL_MS, 30000),
+    orderTtlMs: parseNumber(process.env.ORDER_TTL_MS, 5000),
     mvpMaxPriceDriftBps: parseNumber(process.env.MVP_MAX_PRICE_DRIFT_BPS, 20),
     minSourcePrice: parseNumber(process.env.MIN_SOURCE_PRICE, 0.97),
     maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
