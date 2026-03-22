@@ -135,6 +135,8 @@ export interface SignalMakerExecutionResult extends CopyExecutionResult {
   reason: string;
 }
 
+const MIN_SHARES = 5;
+
 export class TradeExecutor {
   private wallet: ethers.Wallet;
   private provider: ethers.providers.JsonRpcProvider;
@@ -1870,17 +1872,24 @@ export class TradeExecutor {
     originalTrade: Trade,
     copyNotionalOverride?: number
   ): Promise<CopyExecutionResult> {
-    const copyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
+    const initialCopyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
     const configuredOrderType = this.getConfiguredExecutionOrderType();
     const fixedExecutionPrice = await this.validatePrice(config.trading.executionFixedPrice, originalTrade.tokenId);
+    let adjustedCopyNotional = initialCopyNotional;
+    let adjustedCopyShares = this.calculateSharesFromNotional(adjustedCopyNotional, fixedExecutionPrice);
+    const minSizeAdjusted = adjustedCopyShares < MIN_SHARES;
+
+    if (minSizeAdjusted) {
+      adjustedCopyShares = MIN_SHARES;
+      adjustedCopyNotional = Math.round(adjustedCopyShares * fixedExecutionPrice * 100) / 100;
+    }
 
     console.log(`📈 Executing signal-triggered trade:`);
     console.log(`   Market: ${originalTrade.market}`);
     console.log(`   Side: ${originalTrade.side}`);
     console.log(`   Original size: ${originalTrade.size} USDC`);
     console.log(`   Token ID: ${originalTrade.tokenId}`);
-    console.log(`   Copy notional: ${copyNotional} USDC`);
-    const copyShares = this.calculateSharesFromNotional(copyNotional, fixedExecutionPrice);
+    console.log(`   Copy notional: ${initialCopyNotional} USDC`);
     console.log('[Execution Plan]', {
       pricingMode: 'fixed_signal_price',
       sourceSide: originalTrade.outcome,
@@ -1892,16 +1901,20 @@ export class TradeExecutor {
       latestBestAsk: null,
       chosenPrice: fixedExecutionPrice,
       priceDriftBps: 0,
-      copyNotional,
-      derivedShares: copyShares,
+      copyNotional: initialCopyNotional,
+      derivedShares: adjustedCopyShares,
+      adjustedNotional: adjustedCopyNotional,
+      adjustedShares: adjustedCopyShares,
+      reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
       orderType: configuredOrderType,
     });
     return this.executeDirectSourceOrder(
       originalTrade,
-      copyNotional,
+      adjustedCopyNotional,
       fixedExecutionPrice,
-      copyShares,
-      configuredOrderType
+      adjustedCopyShares,
+      configuredOrderType,
+      minSizeAdjusted
     );
   }
 
@@ -2160,6 +2173,7 @@ export class TradeExecutor {
     executionPrice: number,
     copyShares: number,
     configuredOrderType: 'LIMIT' | 'FOK' | 'FAK',
+    minSizeAdjusted: boolean,
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
@@ -2177,6 +2191,9 @@ export class TradeExecutor {
       copyNotional,
       derivedPrice: executionPrice,
       derivedShares: copyShares,
+      adjustedNotional: copyNotional,
+      adjustedShares: copyShares,
+      reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
       orderType: configuredOrderType,
     });
 
@@ -2192,6 +2209,9 @@ export class TradeExecutor {
       fixedExecutionPrice: executionPrice,
       executionPrice: executionPrice,
       copyNotional,
+      adjustedNotional: copyNotional,
+      adjustedShares: copyShares,
+      reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
     });
 
     const response = await this.submitDirectSourceOrder({
@@ -2225,6 +2245,9 @@ export class TradeExecutor {
       price: executionPrice,
       shares: copyShares,
       notional: copyNotional,
+      adjustedNotional: copyNotional,
+      adjustedShares: copyShares,
+      reason: minSizeAdjusted ? 'min_size_adjust' : 'size_ok',
     });
     return {
       orderId: response.orderID,
