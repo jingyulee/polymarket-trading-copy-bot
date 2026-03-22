@@ -383,7 +383,7 @@ export class TradeExecutor {
   }
 
   async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
-    const WRONG_SIDE_PRICE_TOLERANCE = 0.05;
+    const PRICE_TOLERANCE = 0.05;
     const sourcePrice = Number(originalTrade.price);
     const outcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
     const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
@@ -424,13 +424,23 @@ export class TradeExecutor {
     const oppositeBestAsk = Number.isFinite(oppositeBestAskValue) ? oppositeBestAskValue : null;
     const asksDepth = Array.isArray(chosenOrderbook?.asks) ? chosenOrderbook.asks.length : 0;
     const complementTargetPrice = sourcePrice > 0 ? 1 - sourcePrice : null;
-    const directAskMatches = bestAsk != null && Math.abs(bestAsk - sourcePrice) <= WRONG_SIDE_PRICE_TOLERANCE;
-    const complementAskMatches = complementTargetPrice != null &&
-      oppositeBestAsk != null &&
-      Math.abs(oppositeBestAsk - complementTargetPrice) <= WRONG_SIDE_PRICE_TOLERANCE;
-    const complementBidMatches = complementTargetPrice != null &&
+    const directAskMatches = bestAsk != null && Math.abs(bestAsk - sourcePrice) <= PRICE_TOLERANCE;
+    const oppositeBidMatches = complementTargetPrice != null &&
       oppositeBestBid != null &&
-      Math.abs(oppositeBestBid - complementTargetPrice) <= WRONG_SIDE_PRICE_TOLERANCE;
+      Math.abs(oppositeBestBid - complementTargetPrice) <= PRICE_TOLERANCE;
+    const directBidFallback = bestBid != null && Math.abs(bestBid - sourcePrice) <= PRICE_TOLERANCE;
+    const sourceTokenMatchesChosen = String(originalTrade.tokenId || '').trim() === chosenTokenId;
+    const hasNoDirectAskAndNoOppositeBid = bestAsk == null && oppositeBestBid == null;
+    const validationPassed = directAskMatches || oppositeBidMatches || directBidFallback || (sourceTokenMatchesChosen && hasNoDirectAskAndNoOppositeBid);
+    const validationReason = directAskMatches
+      ? 'direct_ask_match'
+      : oppositeBidMatches
+        ? 'opposite_bid_match'
+        : directBidFallback
+          ? 'direct_bid_fallback'
+          : (sourceTokenMatchesChosen && hasNoDirectAskAndNoOppositeBid)
+            ? 'source_token_matches_chosen_without_quotes'
+            : 'no_reasonable_price_mapping';
     const slippage = bestAsk != null && sourcePrice > 0
       ? (bestAsk - sourcePrice) / sourcePrice
       : null;
@@ -452,8 +462,10 @@ export class TradeExecutor {
       oppositeBestAsk,
       complementTargetPrice,
       directAskMatches,
-      complementAskMatches,
-      complementBidMatches,
+      oppositeBidMatches,
+      directBidFallback,
+      validationPassed,
+      validationReason,
     });
 
     console.log('[Execution Decision]', {
@@ -465,7 +477,7 @@ export class TradeExecutor {
       slippage,
     });
 
-    if (!directAskMatches && !complementAskMatches && !complementBidMatches) {
+    if (!validationPassed) {
       return {
         ...fallbackResult,
         trade: validatedTrade,
