@@ -76,6 +76,17 @@ interface UnreplicableNoAskMarketResult {
   asksDepth: number;
 }
 
+export interface ExecutionValidationResult {
+  trade: Trade;
+  orderbook: any | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  chosenTokenId: string;
+  outcomeSide: 'YES_UP' | 'NO_DOWN';
+  rejected: boolean;
+  reason?: string;
+}
+
 export interface CopyExecutionResult {
   orderId: string;
   copyNotional: number;
@@ -356,6 +367,73 @@ export class TradeExecutor {
       console.warn(`[WARN] outcome mapping not found for tokenId=${tokenId}`);
     }
     return 'UNKNOWN';
+  }
+
+  async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
+    const outcomeSide: 'YES_UP' | 'NO_DOWN' = Number(originalTrade.price) >= 0.5 ? 'YES_UP' : 'NO_DOWN';
+    const candidateTokenIds = await this.resolveExecutionCandidateTokenIds(originalTrade);
+    let chosenTokenId = originalTrade.tokenId;
+    let chosenOrderbook: any | null = null;
+    let chosenBestBid: number | null = null;
+    let chosenBestAsk: number | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (const tokenId of candidateTokenIds) {
+      const orderbook = await this.getOrderbook(tokenId);
+      const bestBidValue = Number(orderbook?.bids?.[0]?.price);
+      const bestAskValue = Number(orderbook?.asks?.[0]?.price);
+      const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
+      const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
+      const bidScore = bestBid == null ? Number.POSITIVE_INFINITY : Math.abs(bestBid - Number(originalTrade.price));
+      const askScore = bestAsk == null ? Number.POSITIVE_INFINITY : Math.abs(bestAsk - Number(originalTrade.price));
+      const score = Math.min(bidScore, askScore);
+
+      if (score < bestScore) {
+        bestScore = score;
+        chosenTokenId = tokenId;
+        chosenOrderbook = orderbook;
+        chosenBestBid = bestBid;
+        chosenBestAsk = bestAsk;
+      }
+    }
+
+    const chosenOutcome = await this.getOutcomeLabel(chosenTokenId);
+    const validatedTrade: Trade = {
+      ...originalTrade,
+      tokenId: chosenTokenId,
+      outcome: chosenOutcome,
+      outcomeName: chosenOutcome,
+    };
+
+    console.log('[Execution Validation]', {
+      sourcePrice: originalTrade.price,
+      bestBid: chosenBestBid,
+      chosenTokenId,
+      outcomeSide,
+    });
+
+    if (chosenBestBid == null || Math.abs(chosenBestBid - Number(originalTrade.price)) > 0.1) {
+      return {
+        trade: validatedTrade,
+        orderbook: chosenOrderbook,
+        bestBid: chosenBestBid,
+        bestAsk: chosenBestAsk,
+        chosenTokenId,
+        outcomeSide,
+        rejected: true,
+        reason: 'wrong_token_side_validation_failed',
+      };
+    }
+
+    return {
+      trade: validatedTrade,
+      orderbook: chosenOrderbook,
+      bestBid: chosenBestBid,
+      bestAsk: chosenBestAsk,
+      chosenTokenId,
+      outcomeSide,
+      rejected: false,
+    };
   }
 
   private async resolveOutcomeLabel(tokenId: string): Promise<string | undefined> {
@@ -959,6 +1037,33 @@ export class TradeExecutor {
       for (const tokenId of this.parseTokenIdList(fallbackField)) {
         tokenIds.add(tokenId);
       }
+    }
+
+    return Array.from(tokenIds);
+  }
+
+  private async resolveExecutionCandidateTokenIds(trade: Trade): Promise<string[]> {
+    const tokenIds = new Set<string>();
+    if (trade.tokenId) {
+      tokenIds.add(String(trade.tokenId));
+    }
+
+    try {
+      const markets = await this.loadActiveOpenMarkets();
+      for (const market of markets) {
+        const conditionId = String(market?.conditionId || market?.condition_id || '').trim();
+        const marketSlug = String(market?.slug || market?.marketSlug || market?.market_slug || '').trim();
+        if (
+          (trade.conditionId && conditionId === trade.conditionId) ||
+          (trade.marketSlug && marketSlug && marketSlug === trade.marketSlug)
+        ) {
+          for (const tokenId of this.extractTokenIdsFromMarket(market)) {
+            tokenIds.add(tokenId);
+          }
+        }
+      }
+    } catch (error: any) {
+      console.log(`⚠️  Execution candidate token resolution failed: ${error?.message || 'Unknown error'}`);
     }
 
     return Array.from(tokenIds);

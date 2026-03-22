@@ -2,7 +2,7 @@ import { config, envPath, validateConfig } from './config.js';
 import { TradeMonitor } from './monitor.js';
 import { WebSocketMonitor } from './websocket-monitor.js';
 import type { Trade } from './monitor.js';
-import { TradeExecutor, type SignalMakerExecutionResult } from './trader.js';
+import { TradeExecutor, type ExecutionValidationResult, type SignalMakerExecutionResult } from './trader.js';
 import { PositionTracker } from './positions.js';
 import { RiskManager } from './risk-manager.js';
 import { applyFilters, applyLightweightFilters, getMarketLockKey } from './filter.js';
@@ -712,7 +712,6 @@ class PolymarketCopyBot {
     const sourceAgeMs = Math.max(0, now - (trade.timestamp || now));
     const sourcePrice = Number(trade.price);
     const sourceSizeUsd = Number(trade.size);
-    const marketLockKey = getMarketLockKey(trade);
     const signalKey = getSignalKey(trade);
     const signalCaptureEligible = config.trading.enableSignalTrigger && this.canCaptureSignalTrade(trade, sourceAgeMs);
 
@@ -740,6 +739,7 @@ class PolymarketCopyBot {
     let effectiveTrade = trade;
     let signalConfirmation: SignalConfirmationContext | null = null;
     let activeSignal = getSignal(signalKey, now, config.trading.signalWindowMs);
+    let executionValidation: ExecutionValidationResult | null = null;
 
     if (signalCaptureEligible) {
       activeSignal = captureSignal(trade, now, config.trading.signalWindowMs);
@@ -792,8 +792,21 @@ class PolymarketCopyBot {
       return;
     }
 
+    executionValidation = await this.executor.validateExecutionTarget(effectiveTrade);
+    effectiveTrade = executionValidation.trade;
+    const marketLockKey = getMarketLockKey(effectiveTrade);
+    if (executionValidation.rejected) {
+      this.handleTradeSkip(trade, {
+        reason: executionValidation.reason || 'wrong_token_side_validation_failed',
+        sourceAgeMs,
+        marketLockKey,
+      });
+      this.printStats();
+      return;
+    }
+
     const marketLockSkipReason = marketLockKey
-      ? this.getMarketLockSkipReason(trade, marketLockKey, now)
+      ? this.getMarketLockSkipReason(effectiveTrade, marketLockKey, now)
       : null;
     if (marketLockSkipReason) {
       this.handleTradeSkip(trade, {
@@ -830,9 +843,9 @@ class PolymarketCopyBot {
       await this.wsMonitor.subscribeToMarket(effectiveTrade.tokenId);
     }
 
-    const orderbook = await this.executor.getOrderbook(effectiveTrade.tokenId);
-    const bestBidValue = Number(orderbook?.bids?.[0]?.price);
-    const bestAskValue = Number(orderbook?.asks?.[0]?.price);
+    const orderbook = executionValidation?.orderbook ?? await this.executor.getOrderbook(effectiveTrade.tokenId);
+    const bestBidValue = executionValidation?.bestBid ?? Number(orderbook?.bids?.[0]?.price);
+    const bestAskValue = executionValidation?.bestAsk ?? Number(orderbook?.asks?.[0]?.price);
     const bestAskSize = Number(orderbook?.asks?.[0]?.size);
     const bidsDepth = orderbook?.bids?.length || 0;
     const asksDepth = orderbook?.asks?.length || 0;
