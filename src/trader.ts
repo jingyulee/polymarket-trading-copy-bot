@@ -1299,10 +1299,9 @@ export class TradeExecutor {
     originalTrade: Trade,
     copyNotionalOverride?: number
   ): Promise<CopyExecutionResult> {
-    const orderType = config.trading.orderType;
     const copyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
 
-    console.log(`📈 Executing copy trade (${orderType}):`);
+    console.log(`📈 Executing signal-triggered trade:`);
     console.log(`   Market: ${originalTrade.market}`);
     console.log(`   Side: ${originalTrade.side}`);
     console.log(`   Original size: ${originalTrade.size} USDC`);
@@ -1310,11 +1309,25 @@ export class TradeExecutor {
     console.log(`   Copy notional: ${copyNotional} USDC`);
 
     return this.executeWithRetry(async () => {
-      if (orderType === 'FOK' || orderType === 'FAK') {
-        return this.executeMarketOrder(originalTrade, orderType, copyNotional);
-      } else {
-        return this.executeLimitOrder(originalTrade, copyNotional);
+      try {
+        return await this.executeSignalTakerOrder(originalTrade, 'FOK', copyNotional);
+      } catch (fokError: any) {
+        console.log(`⚠️  FOK taker failed: ${fokError?.message || 'Unknown error'}`);
       }
+
+      try {
+        return await this.executeSignalTakerOrder(originalTrade, 'FAK', copyNotional);
+      } catch (fakError: any) {
+        console.log(`⚠️  FAK taker failed: ${fakError?.message || 'Unknown error'}`);
+      }
+
+      const orderbook = await this.getOrderbookForExecution(originalTrade.tokenId).catch(() => ({ bids: [], asks: [] }));
+      const makerFallbackResult = await this.tryMakerFallback(originalTrade, copyNotional, orderbook || { bids: [], asks: [] });
+      if (makerFallbackResult) {
+        return makerFallbackResult;
+      }
+
+      throw new Error('signal_execution_exhausted');
     });
   }
 
@@ -1477,6 +1490,66 @@ export class TradeExecutor {
       fillSize: params.fillSize,
       copyNotional: params.copyNotional,
     });
+  }
+
+  private async getSignalTakerPrice(originalTrade: Trade): Promise<number> {
+    const sourcePrice = Number(originalTrade.price);
+    const rawPrice = originalTrade.side === 'BUY'
+      ? Math.min(sourcePrice + 0.01, 0.995)
+      : Math.max(sourcePrice - 0.01, 0.005);
+    return this.validatePrice(rawPrice, originalTrade.tokenId);
+  }
+
+  private async executeSignalTakerOrder(
+    originalTrade: Trade,
+    orderType: 'FOK' | 'FAK',
+    copyNotional: number
+  ): Promise<CopyExecutionResult> {
+    await this.validateBalance(copyNotional, originalTrade.tokenId);
+
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
+    const validatedPrice = await this.getSignalTakerPrice(originalTrade);
+    const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+    const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+
+    console.log('[Signal Taker Attempt]', {
+      tokenId: originalTrade.tokenId,
+      market: originalTrade.market,
+      side: originalTrade.side,
+      sourcePrice: originalTrade.price,
+      executionPrice: validatedPrice,
+      orderType,
+      copyNotional,
+    });
+
+    const response = await this.clobClient.createAndPostMarketOrder(
+      {
+        tokenID: originalTrade.tokenId,
+        amount: originalTrade.side === 'BUY' ? copyNotional : copyShares,
+        price: validatedPrice,
+        side: originalTrade.side as Side,
+        feeRateBps,
+        orderType: orderTypeEnum,
+      },
+      orderOpts,
+      orderTypeEnum
+    );
+
+    if (!response.success) {
+      const errorMsg = response.errorMsg || response.error || 'Unknown error';
+      throw new Error(`${orderType}_failed:${errorMsg}`);
+    }
+
+    console.log(`✅ ${orderType} order executed: ${response.orderID}`);
+    return {
+      orderId: response.orderID,
+      copyNotional,
+      copyShares,
+      price: validatedPrice,
+      side: originalTrade.side,
+      tokenId: originalTrade.tokenId,
+    };
   }
 
   async executeSignalMakerEntry(
@@ -1716,7 +1789,7 @@ export class TradeExecutor {
     copyNotional: number,
     orderbook: any
   ): Promise<CopyExecutionResult | null> {
-    if (!config.trading.enableMakerFallback || originalTrade.side !== 'BUY' || (orderbook?.asks?.length || 0) > 0) {
+    if (originalTrade.side !== 'BUY') {
       return null;
     }
 
@@ -1734,35 +1807,17 @@ export class TradeExecutor {
       asksDepth
     });
 
-    console.log('⚠️  No asks available, trying maker fallback');
+    console.log('⚠️  Trying maker fallback');
 
     if (!Number.isFinite(bestBid) || bestBid <= 0) {
       console.log('   No best bid available; skipping maker fallback');
-      throw new Error('SKIP:no_bids_no_asks_orderbook');
-    }
-
-    if (bestBid < config.trading.minBestBidForMakerFallback) {
-      console.log(`   Skip reason: maker_fallback_bid_too_low`);
-      console.log(`   bestBid=${bestBid.toFixed(4)} minBestBidForMakerFallback=${config.trading.minBestBidForMakerFallback.toFixed(4)}`);
-      throw new Error('SKIP:maker_fallback_bid_too_low');
-    }
-
-    if (Number.isFinite(spread) && spread > config.trading.maxSpreadForEntry) {
-      console.log(`   Skip reason: spread_too_wide`);
-      console.log(`   bestBid=${bestBid.toFixed(4)} bestAsk=${bestAsk.toFixed(4)} spread=${spread.toFixed(4)} maxSpreadForEntry=${config.trading.maxSpreadForEntry.toFixed(4)}`);
-      throw new Error('SKIP:spread_too_wide');
-    }
-
-    if (asksDepth === 0 && bidsDepth < 1) {
-      console.log(`   Skip reason: no_bids_no_asks_orderbook`);
-      console.log(`   bestBid=${bestBid.toFixed(4)} bestAsk=${bestAsk.toFixed(4)} spread=${spread.toFixed(4)} bidsDepth=${bidsDepth} asksDepth=${asksDepth}`);
-      throw new Error('SKIP:no_bids_no_asks_orderbook');
+      return null;
     }
 
     console.log(`   Best bid: ${bestBid.toFixed(4)}`);
 
-    const rawPrice = bestBid * (1 + config.trading.makerFallbackPriceOffsetBps / 10000);
-    const cappedPrice = Math.min(rawPrice, config.trading.maxSourcePrice, 0.99);
+    const rawPrice = bestBid + 0.01;
+    const cappedPrice = Math.min(rawPrice, 0.995);
     const validatedPrice = await this.validatePrice(cappedPrice, originalTrade.tokenId);
     const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
@@ -1796,14 +1851,14 @@ export class TradeExecutor {
     console.log(`   Maker fallback order placed: ${orderId}`);
     this.logMakerFallbackEvent(originalTrade, {
       action: 'maker_fallback_placed',
-      reason: 'asks_empty_fallback',
+      reason: 'signal_trigger_maker_fallback',
       orderId,
       fillPrice: validatedPrice,
       fillSize: copyShares,
       copyNotional,
     });
 
-    const deadline = Date.now() + Math.max(1000, config.trading.makerFallbackTtlMs);
+    const deadline = Date.now() + 3000;
     let lastMatched = 0;
     let lastOrderStatus = '';
     let resolvedPrice = validatedPrice;
@@ -1884,7 +1939,7 @@ export class TradeExecutor {
       };
     }
 
-    throw new Error('SKIP:maker_fallback_timeout_cancelled');
+    throw new Error('maker_fallback_timeout_cancelled');
   }
 
   private async executeLimitOrder(originalTrade: Trade, copyNotional: number): Promise<CopyExecutionResult> {

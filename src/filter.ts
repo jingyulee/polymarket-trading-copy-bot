@@ -45,7 +45,12 @@ export interface FilterContext {
 const HIGH_LIQUIDITY_SYMBOLS = new Set(['bitcoin', 'ethereum', 'solana']);
 
 export function getMarketLockKey(trade: FilterTrade): string {
-  return String(trade.conditionId || '').trim();
+  const marketKey = String(trade.conditionId || trade.marketSlug || trade.market || trade.tokenId || '').trim();
+  const outcome = String(trade.outcomeName || trade.outcome || 'UNKNOWN').trim().toUpperCase();
+  if (!marketKey) {
+    return '';
+  }
+  return `${marketKey}|${outcome}`;
 }
 
 export function applyFilters(trade: FilterTrade, context: FilterContext = {}): FilterResult {
@@ -137,8 +142,8 @@ export function applyLightweightFilters(trade: FilterTrade, context: FilterConte
     return { pass: false, reason: 'skip_sell_trade' };
   }
 
-  if (!Number.isFinite(sourcePrice) || sourcePrice < config.trading.minSourcePrice || sourcePrice > config.trading.maxSourcePrice) {
-    return { pass: false, reason: 'source_price_out_of_range' };
+  if (!Number.isFinite(sourcePrice)) {
+    return { pass: false, reason: 'source_price_missing' };
   }
 
   if (!Number.isFinite(sourceSizeUsd) || sourceSizeUsd < config.trading.minSourceTradeUsd) {

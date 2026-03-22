@@ -258,7 +258,7 @@ const insertProcessedTrade = db.prepare(`
 `);
 
 const insertMarketLock = db.prepare(`
-  INSERT OR IGNORE INTO market_lock (lock_key, ts)
+  INSERT OR REPLACE INTO market_lock (lock_key, ts)
   VALUES (?, ?)
 `);
 
@@ -407,14 +407,14 @@ export function loadRecentProcessedTradeKeys(windowMs: number = 7 * 24 * 60 * 60
 }
 
 export function loadRecentMarketLocks(windowMs: number = 7 * 24 * 60 * 60 * 1000): string[] {
-  const since = Date.now() - windowMs;
+  const now = Date.now();
   const stmt = db.prepare(`
     SELECT lock_key
     FROM market_lock
     WHERE ts >= ?
     ORDER BY ts ASC
   `);
-  const rows = stmt.all(since) as Array<{ lock_key: string }>;
+  const rows = stmt.all(now) as Array<{ lock_key: string }>;
   return rows.map((row) => row.lock_key);
 }
 

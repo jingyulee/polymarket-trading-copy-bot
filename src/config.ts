@@ -79,7 +79,7 @@ export const config = {
     maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
     maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 35000),
     minSourceTradeUsd: parseNumber(process.env.MIN_SOURCE_TRADE_USD, 2),
-    maxUsdPerOrder: parseNumber(process.env.MAX_USD_PER_ORDER, 5),
+    maxUsdPerOrder: parseNumber(process.env.MAX_USD_PER_ORDER, 3),
     marketScope: process.env.MARKET_SCOPE || 'crypto-only',
     cryptoKeywords: parseCsv(process.env.CRYPTO_KEYWORDS || 'btc,bitcoin,eth,ethereum,sol,solana,xrp,doge,dogecoin,bnb,hyperliquid,hype,avax,pepe,sui,arb'),
     oneTradePerMarket: parseBoolean(process.env.ONE_TRADE_PER_MARKET, true),

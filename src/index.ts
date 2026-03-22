@@ -58,6 +58,7 @@ interface MarketRetryState {
 }
 
 class PolymarketCopyBot {
+  private readonly HARD_MARKET_LOCK_TTL_MS = 5 * 60 * 1000;
   private monitor: TradeMonitor;
   private wsMonitor?: WebSocketMonitor;
   private executor: TradeExecutor;
@@ -237,6 +238,18 @@ class PolymarketCopyBot {
     bidsDepth: number;
     asksDepth: number;
   }): boolean {
+    if (config.trading.enableSignalTrigger && trade.side === 'BUY') {
+      console.log('[NoAsks Filter Bypass]', {
+        tokenId: trade.tokenId,
+        market: trade.market,
+        bestBid: marketSnapshot.bestBid,
+        bidsDepth: marketSnapshot.bidsDepth,
+        asksDepth: marketSnapshot.asksDepth,
+        fallbackEnabled: 'signal_trigger_execution',
+      });
+      return true;
+    }
+
     const shouldBypass = Boolean(
       config.trading.enableNoAsksFallback &&
       trade.side === 'BUY' &&
@@ -322,10 +335,12 @@ class PolymarketCopyBot {
     if (windowMs > config.trading.signalWindowMs) {
       return null;
     }
-    if (signal.tradeCount < config.trading.signalMinTradeCount) {
-      return null;
-    }
-    if (signal.cumulativeSourceUsd < config.trading.signalMinCumulativeUsd) {
+    const shouldTrigger = (
+      signal.tradeCount >= config.trading.signalMinTradeCount ||
+      signal.cumulativeSourceUsd >= 50 ||
+      signal.maxSingleTradeUsd >= 50
+    );
+    if (!shouldTrigger) {
       return null;
     }
 
@@ -366,6 +381,9 @@ class PolymarketCopyBot {
 
     if (!signalConfirmation) {
       return baseDecision;
+    }
+    if (config.trading.enableSignalTrigger) {
+      return { ...baseDecision, reason: 'signal_trigger_prefers_taker_execution' };
     }
     if (!config.trading.enableSignalMakerEntry) {
       return { ...baseDecision, reason: 'signal_maker_entry_disabled' };
@@ -525,7 +543,9 @@ class PolymarketCopyBot {
     const lockedUntil = params.lockType === 'hard'
       ? Number.MAX_SAFE_INTEGER
       : Date.now() + Math.max(0, params.lockMs ?? config.trading.marketShortLockMs);
-    const lockTs = trade.timestamp || Date.now();
+    const lockTs = params.lockType === 'hard'
+      ? Date.now() + this.HARD_MARKET_LOCK_TTL_MS
+      : trade.timestamp || Date.now();
 
     if (params.lockType === 'hard') {
       this.marketLocks.add(marketLockKey);

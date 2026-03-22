@@ -17,6 +17,7 @@ export interface SignalEntry {
   lastTs: number;
   tradeCount: number;
   cumulativeSourceUsd: number;
+  maxSingleTradeUsd: number;
   firstSourcePrice: number;
   latestSourcePrice: number;
   minSourcePrice: number;
@@ -44,8 +45,9 @@ export function getSignalKey(trade: SignalTradeLike): string {
     trade.market ||
     trade.tokenId ||
     'unknown-market';
+  const outcome = String(trade.outcome || 'UNKNOWN').trim().toUpperCase();
   const side = String(trade.side || 'UNKNOWN').trim().toUpperCase();
-  return `${marketKey}|${side}`;
+  return `${marketKey}|${outcome}|${side}`;
 }
 
 export function captureSignal(trade: SignalTradeLike, now: number, windowMs: number): SignalEntry {
@@ -74,6 +76,7 @@ export function captureSignal(trade: SignalTradeLike, now: number, windowMs: num
       lastTs: now,
       tradeCount: 1,
       cumulativeSourceUsd: size,
+      maxSingleTradeUsd: size,
       firstSourcePrice: price,
       latestSourcePrice: price,
       minSourcePrice: price,
@@ -89,6 +92,7 @@ export function captureSignal(trade: SignalTradeLike, now: number, windowMs: num
       lastTs: now,
       tradeCount: existing.tradeCount + 1,
       cumulativeSourceUsd: existing.cumulativeSourceUsd + size,
+      maxSingleTradeUsd: Math.max(existing.maxSingleTradeUsd, size),
       latestSourcePrice: price,
       minSourcePrice: Math.min(existing.minSourcePrice, price),
       maxSourcePrice: Math.max(existing.maxSourcePrice, price),
