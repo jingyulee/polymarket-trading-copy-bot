@@ -60,14 +60,6 @@ interface MarketRetryState {
 
 class PolymarketCopyBot {
   private readonly HARD_MARKET_LOCK_TTL_MS = 5 * 60 * 1000;
-  private readonly EXECUTION_READY_GATE_BYPASS_REASONS = new Set([
-    'not_high_liquidity_symbol',
-    'orderbook_liquidity_too_low',
-    'asks_depth_too_low',
-    'spread_too_wide',
-    'price_deviation_too_high',
-    'slippage_gap_too_high',
-  ]);
   private monitor: TradeMonitor;
   private wsMonitor?: WebSocketMonitor;
   private executor: TradeExecutor;
@@ -241,45 +233,6 @@ class PolymarketCopyBot {
       allowed,
     });
     return { matchedSymbol, allowed };
-  }
-
-  private shouldBypassNoAsksFilter(trade: Trade, marketSnapshot: {
-    bestBid: number | null;
-    bidsDepth: number;
-    asksDepth: number;
-  }): boolean {
-    if (config.trading.enableSignalTrigger && trade.side === 'BUY') {
-      console.log('[NoAsks Filter Bypass]', {
-        tokenId: trade.tokenId,
-        market: trade.market,
-        bestBid: marketSnapshot.bestBid,
-        bidsDepth: marketSnapshot.bidsDepth,
-        asksDepth: marketSnapshot.asksDepth,
-        fallbackEnabled: 'signal_trigger_execution',
-      });
-      return true;
-    }
-
-    const shouldBypass = Boolean(
-      config.trading.enableNoAsksFallback &&
-      trade.side === 'BUY' &&
-      marketSnapshot.asksDepth === 0 &&
-      marketSnapshot.bestBid != null &&
-      marketSnapshot.bidsDepth > 0
-    );
-
-    if (shouldBypass) {
-      console.log('[NoAsks Filter Bypass]', {
-        tokenId: trade.tokenId,
-        market: trade.market,
-        bestBid: marketSnapshot.bestBid,
-        bidsDepth: marketSnapshot.bidsDepth,
-        asksDepth: marketSnapshot.asksDepth,
-        fallbackEnabled: true,
-      });
-    }
-
-    return shouldBypass;
   }
 
   private canCaptureSignalTrade(trade: Trade, sourceAgeMs: number): boolean {
@@ -961,27 +914,13 @@ class PolymarketCopyBot {
       return;
     }
     if (executionValidation.rejected) {
-      if (
-        (executionValidation.reason === 'wrong_token_side_detected' ||
-          executionValidation.reason === 'no_ask_on_source_side') &&
-        executionValidation.chosenTokenId
-      ) {
-        console.log('[Execution Validation Bypassed]', {
-          market: effectiveTrade.market,
-          sourcePrice: executionSourcePrice,
-          chosenSide: executionValidation.outcomeSide,
-          tokenId: executionValidation.chosenTokenId,
-          reason: 'mvp_direct_execution',
-        });
-      } else {
-        this.handleTradeSkip(trade, {
-          reason: executionValidation.reason || 'wrong_token_side_validation_failed',
-          sourceAgeMs,
-          marketLockKey,
-        });
-        this.printStats();
-        return;
-      }
+      this.handleTradeSkip(trade, {
+        reason: executionValidation.reason || 'wrong_token_side_validation_failed',
+        sourceAgeMs,
+        marketLockKey,
+      });
+      this.printStats();
+      return;
     }
 
     const marketLockSkipReason = marketLockKey
@@ -1003,8 +942,7 @@ class PolymarketCopyBot {
       now,
     });
 
-    const bypassLightweightExecutionGate = this.EXECUTION_READY_GATE_BYPASS_REASONS.has(lightweightFilterResult.reason);
-    if (!lightweightFilterResult.pass && !bypassLightweightExecutionGate) {
+    if (!lightweightFilterResult.pass) {
       this.handleTradeSkip(trade, {
         reason: lightweightFilterResult.reason,
         sourceAgeMs,
@@ -1013,14 +951,6 @@ class PolymarketCopyBot {
       console.log(`⚠️  Lightweight filter skipped trade: ${lightweightFilterResult.reason}`);
       this.printStats();
       return;
-    }
-    if (bypassLightweightExecutionGate) {
-      console.log('[Execution Gate Bypassed In MVP]', {
-        market: effectiveTrade.market,
-        tokenId: effectiveTrade.tokenId,
-        skippedGate: lightweightFilterResult.reason,
-        reason: 'execution_ready_path',
-      });
     }
 
     if (this.wsMonitor) {
@@ -1063,15 +993,8 @@ class PolymarketCopyBot {
         marketLocks: this.marketLocks,
       });
 
-    const bypassNoAsksFilter = effectiveFilterResult.reason === 'no_asks_in_orderbook' && this.shouldBypassNoAsksFilter(effectiveTrade, {
-      bestBid,
-      bidsDepth,
-      asksDepth,
-    });
     const noLiquidityBothSides = effectiveFilterResult.reason === 'no_asks_in_orderbook' && asksDepth === 0 && (bestBid == null || bidsDepth === 0);
-
-    const bypassExecutionReadyFilterGate = this.EXECUTION_READY_GATE_BYPASS_REASONS.has(effectiveFilterResult.reason);
-    if (!effectiveFilterResult.pass && !bypassNoAsksFilter && !bypassExecutionReadyFilterGate) {
+    if (!effectiveFilterResult.pass) {
       const resolvedReason = noLiquidityBothSides ? 'no_liquidity_both_sides' : effectiveFilterResult.reason;
       this.handleTradeSkip(trade, {
         reason: resolvedReason,
@@ -1088,17 +1011,6 @@ class PolymarketCopyBot {
       });
       this.printStats();
       return;
-    }
-    if (bypassExecutionReadyFilterGate) {
-      console.log('[Execution Gate Bypassed In MVP]', {
-        market: effectiveTrade.market,
-        tokenId: effectiveTrade.tokenId,
-        skippedGate: effectiveFilterResult.reason,
-        reason: 'execution_ready_path',
-      });
-    }
-    if (bypassNoAsksFilter) {
-      console.log('ℹ️  Bypassing no_asks_in_orderbook filter so fallback execution can handle the trade');
     }
 
     const copyNotional = this.executor.calculateCopySize(effectiveTrade.size);

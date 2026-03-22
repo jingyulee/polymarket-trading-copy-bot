@@ -575,8 +575,13 @@ export class TradeExecutor {
     const lookup = await this.getOrderbookLookup(expectedTokenId, trade.market);
     console.log('[Signal Precheck]', {
       sourceSide: sourceOutcomeSide,
+      executionSide: sourceOutcomeSide,
       tokenId: expectedTokenId,
       bestAsk: lookup.bestAsk,
+      bestBid: lookup.bestBid,
+      asksDepth: lookup.asksDepth,
+      bidsDepth: lookup.bidsDepth,
+      action: lookup.status === 'not_found' || lookup.bestAsk == null || lookup.bestAsk <= 0 ? 'skip' : 'continue',
     });
 
     const resolvedTrade: Trade = {
@@ -586,11 +591,19 @@ export class TradeExecutor {
       outcomeName: sourceOutcomeSide,
     };
 
-    if (lookup.status === 'not_found') {
+    if (lookup.status === 'not_found' || lookup.bestAsk == null || lookup.bestAsk <= 0) {
+      console.log('[Signal Precheck Skip]', {
+        reason: 'no_ask_on_source_side',
+        sourceSide: sourceOutcomeSide,
+        executionSide: sourceOutcomeSide,
+        tokenId: expectedTokenId,
+        bestAsk: lookup.bestAsk,
+        asksDepth: lookup.asksDepth,
+      });
       return {
         ok: false,
         trade: resolvedTrade,
-        reason: 'no_orderbook_on_source_side',
+        reason: 'no_ask_on_source_side',
         tokenId: expectedTokenId,
         bestAsk: lookup.bestAsk,
         bestBid: lookup.bestBid,
