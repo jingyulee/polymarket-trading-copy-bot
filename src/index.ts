@@ -24,14 +24,16 @@ import { startTelegramCommandWatcher } from './telegram-commands.js';
 import { formatTradeMessage } from './telegram-trade-formatter.js';
 import { startRedeemWatcher } from './redeem-watcher.js';
 import { startSettlementUpdater } from './settlement-updater.js';
-import { captureSignal, deleteSignal, getSignal, getSignalKey, SIGNAL_TTL_MS } from './signal-cache.js';
+import { captureSignal, consumeSignal, getSignal, getSignalKey, type SignalEntry } from './signal-cache.js';
 
 interface SignalConfirmationContext {
   ageMs: number;
-  signalPrice: number;
-  confirmationPrice: number;
-  entryPrice: number;
-  signalSourceSize: number;
+  firstPrice: number;
+  latestPrice: number;
+  effectiveSignalPrice: number;
+  cumulativeSourceUsd: number;
+  tradeCount: number;
+  windowMs: number;
 }
 
 interface SignalMakerEntryDecision {
@@ -95,6 +97,10 @@ class PolymarketCopyBot {
     console.log(`Market scope: ${config.trading.marketScope}`);
     console.log(`WebSocket: ${config.monitoring.useWebSocket ? 'Enabled' : 'Disabled'}`);
     console.log(`Prewarm match mode: ${config.monitoring.prewarmMatchMode}`);
+    console.log(`Signal trigger: ${config.trading.enableSignalTrigger ? 'Enabled' : 'Disabled'}`);
+    console.log(`signalWindowMs: ${config.trading.signalWindowMs}`);
+    console.log(`signalMinTradeCount: ${config.trading.signalMinTradeCount}`);
+    console.log(`signalMinCumulativeUsd: ${config.trading.signalMinCumulativeUsd}`);
     console.log(`No-asks fallback: ${config.trading.enableNoAsksFallback ? 'Enabled' : 'Disabled'} (${config.trading.noAsksFallbackOrderType})`);
     if (config.risk.maxSessionNotional > 0 || config.risk.maxPerMarketNotional > 0) {
       console.log(`Risk caps: session=${config.risk.maxSessionNotional || '∞'} USDC, per-market=${config.risk.maxPerMarketNotional || '∞'} USDC`);
@@ -253,41 +259,90 @@ class PolymarketCopyBot {
     return shouldBypass;
   }
 
-  private shouldCaptureSmallTradeSignal(trade: Trade, sourcePrice: number, sourceAgeMs: number): boolean {
-    if (config.trading.copyOnlyBuy && trade.side !== 'BUY') {
+  private canCaptureSignalTrade(trade: Trade, sourceAgeMs: number): boolean {
+    if ((config.trading.copyOnlyBuy || config.trading.signalRequireBuyOnly) && trade.side !== 'BUY') {
       return false;
     }
-    if (!Number.isFinite(sourcePrice)) {
-      return false;
-    }
-    if (sourcePrice < config.trading.minSourcePrice || sourcePrice > config.trading.maxSourcePrice) {
+    if (!Number.isFinite(Number(trade.price))) {
       return false;
     }
     if (sourceAgeMs > config.trading.maxSourceTradeAgeMs) {
       return false;
     }
+
+    if (config.trading.marketScope === 'crypto-only') {
+      const marketTitle = trade.title || trade.market || trade.question || null;
+      const marketClassification = classifyCryptoMarket({
+        marketTitle,
+        marketSlug: trade.marketSlug,
+        cryptoKeywords: config.trading.cryptoKeywords,
+      });
+      console.log('[Crypto Market Classification]', {
+        marketTitle: trade.title || trade.market || trade.question || null,
+        marketSlug: trade.marketSlug || null,
+        isCrypto: marketClassification.isCrypto,
+        matchedSymbol: marketClassification.matchedSymbol,
+        matchedKeyword: marketClassification.matchedKeyword,
+        matchedField: marketClassification.matchedField,
+        reason: marketClassification.reason,
+      });
+      console.log('[Market Scope]', {
+        marketTitle,
+        marketSlug: trade.marketSlug || null,
+        matchedSymbol: marketClassification.matchedSymbol,
+        matchedKeyword: marketClassification.matchedKeyword,
+        matchedField: marketClassification.matchedField,
+        result: marketClassification.isCrypto ? 'crypto' : 'non_crypto',
+        reason: marketClassification.reason,
+      });
+      if (!marketClassification.isCrypto) {
+        return false;
+      }
+    }
+
     return true;
   }
 
-  private getSignalBoostPrice(trade: Trade, signalPrice: number): number | null {
-    const sourcePrice = Number(trade.price);
-    if (!Number.isFinite(sourcePrice) || !Number.isFinite(signalPrice)) {
+  private getEffectiveSignalPrice(signal: SignalEntry): number | null {
+    const effectiveSignalPrice = Number(signal.maxSourcePrice);
+    if (!Number.isFinite(effectiveSignalPrice)) {
       return null;
     }
 
-    const slippageCap = signalPrice * (1 + config.trading.slippageTolerance);
-    const boostedPrice = Math.min(
-      sourcePrice,
-      signalPrice + 0.01,
-      slippageCap,
-      config.trading.maxSourcePrice
-    );
-
-    if (!Number.isFinite(boostedPrice)) {
+    const boundedSignalPrice = Math.min(effectiveSignalPrice, config.trading.maxSourcePrice);
+    if (!Number.isFinite(boundedSignalPrice)) {
       return null;
     }
 
-    return Math.round(boostedPrice * 10000) / 10000;
+    return Math.round(boundedSignalPrice * 10000) / 10000;
+  }
+
+  private getSignalConfirmation(signal: SignalEntry, now: number): SignalConfirmationContext | null {
+    const windowMs = Math.max(0, now - signal.firstTs);
+    if (windowMs > config.trading.signalWindowMs) {
+      return null;
+    }
+    if (signal.tradeCount < config.trading.signalMinTradeCount) {
+      return null;
+    }
+    if (signal.cumulativeSourceUsd < config.trading.signalMinCumulativeUsd) {
+      return null;
+    }
+
+    const effectiveSignalPrice = this.getEffectiveSignalPrice(signal);
+    if (effectiveSignalPrice == null) {
+      return null;
+    }
+
+    return {
+      ageMs: Math.max(0, now - signal.lastTs),
+      firstPrice: signal.firstSourcePrice,
+      latestPrice: signal.latestSourcePrice,
+      effectiveSignalPrice,
+      cumulativeSourceUsd: signal.cumulativeSourceUsd,
+      tradeCount: signal.tradeCount,
+      windowMs,
+    };
   }
 
   private async shouldPlaceSignalMakerEntry(params: {
@@ -322,7 +377,7 @@ class PolymarketCopyBot {
     if (trade.price < 0.95) {
       return { ...baseDecision, reason: 'source_price_below_0_95' };
     }
-    if (signalConfirmation.ageMs > SIGNAL_TTL_MS) {
+    if (signalConfirmation.windowMs > config.trading.signalWindowMs) {
       return { ...baseDecision, reason: 'signal_expired' };
     }
     if (asksDepth !== 0) {
@@ -343,7 +398,7 @@ class PolymarketCopyBot {
 
     const candidatePrice = await this.executor.getValidatedPriceForDecision(
       Math.min(
-        trade.price,
+        signalConfirmation.effectiveSignalPrice,
         bestBid + config.trading.signalMakerPriceOffset,
         config.trading.maxSourcePrice,
         0.99
@@ -617,7 +672,7 @@ class PolymarketCopyBot {
     const sourceSizeUsd = Number(trade.size);
     const marketLockKey = getMarketLockKey(trade);
     const signalKey = getSignalKey(trade);
-    const marketLockSkipReason = this.getMarketLockSkipReason(trade, marketLockKey, now);
+    const signalCaptureEligible = config.trading.enableSignalTrigger && this.canCaptureSignalTrade(trade, sourceAgeMs);
 
     console.log('\n' + '='.repeat(50));
     console.log('🎯 NEW TRADE DETECTED');
@@ -629,6 +684,73 @@ class PolymarketCopyBot {
     console.log(`   Age: ${sourceAgeMs}ms`);
     console.log('='.repeat(50));
 
+    if (Number.isFinite(sourceSizeUsd) && sourceSizeUsd < config.trading.minSourceTradeUsd) {
+      console.log('[Source Trade Size]', {
+        key: signalKey,
+        market: trade.market,
+        side: trade.side,
+        sourcePrice,
+        sourceSizeUsd,
+        belowExecutionThreshold: true,
+      });
+    }
+
+    let effectiveTrade = trade;
+    let signalConfirmation: SignalConfirmationContext | null = null;
+    let activeSignal = getSignal(signalKey, now, config.trading.signalWindowMs);
+
+    if (signalCaptureEligible) {
+      activeSignal = captureSignal(trade, now, config.trading.signalWindowMs);
+      console.log('[Signal Captured]', {
+        key: signalKey,
+        market: trade.market,
+        side: trade.side,
+        sourcePrice,
+        sourceSizeUsd,
+        tradeCount: activeSignal.tradeCount,
+        cumulativeSourceUsd: activeSignal.cumulativeSourceUsd,
+        ageMs: Math.max(0, now - activeSignal.firstTs),
+      });
+
+      signalConfirmation = this.getSignalConfirmation(activeSignal, now);
+      if (signalConfirmation) {
+        effectiveTrade = {
+          ...trade,
+          market: activeSignal.latestMarketTitle || trade.market,
+          marketSlug: activeSignal.latestMarketSlug || trade.marketSlug,
+          tokenId: activeSignal.latestTokenId || trade.tokenId,
+          outcome: activeSignal.latestOutcome || trade.outcome,
+          outcomeName: activeSignal.latestOutcome || trade.outcomeName,
+          price: signalConfirmation.effectiveSignalPrice,
+          size: Math.max(trade.size, signalConfirmation.cumulativeSourceUsd),
+        };
+        console.log('[Signal Confirmed]', {
+          key: signalKey,
+          market: effectiveTrade.market,
+          side: effectiveTrade.side,
+          tradeCount: signalConfirmation.tradeCount,
+          cumulativeSourceUsd: signalConfirmation.cumulativeSourceUsd,
+          firstPrice: signalConfirmation.firstPrice,
+          latestPrice: signalConfirmation.latestPrice,
+          effectiveSignalPrice: signalConfirmation.effectiveSignalPrice,
+          windowMs: signalConfirmation.windowMs,
+        });
+      }
+    }
+
+    if (config.trading.enableSignalTrigger && !signalConfirmation && (signalCaptureEligible || activeSignal != null)) {
+      console.log('[Signal Pending]', {
+        key: signalKey,
+        market: trade.market,
+        side: trade.side,
+        tradeCount: activeSignal?.tradeCount ?? 0,
+        cumulativeSourceUsd: activeSignal?.cumulativeSourceUsd ?? 0,
+      });
+      this.printStats();
+      return;
+    }
+
+    const marketLockSkipReason = this.getMarketLockSkipReason(trade, marketLockKey, now);
     if (marketLockSkipReason) {
       this.handleTradeSkip(trade, {
         reason: marketLockSkipReason,
@@ -640,90 +762,7 @@ class PolymarketCopyBot {
       return;
     }
 
-    if (Number.isFinite(sourceSizeUsd) && sourceSizeUsd < config.trading.minSourceTradeUsd) {
-      if (this.shouldCaptureSmallTradeSignal(trade, sourcePrice, sourceAgeMs)) {
-        captureSignal(signalKey, {
-          price: sourcePrice,
-          ts: now,
-          sourceSize: sourceSizeUsd,
-        }, now);
-        console.log('[Signal Captured]', {
-          key: signalKey,
-          market: trade.market,
-          side: trade.side,
-          sourcePrice,
-          sourceSizeUsd,
-          ttlMs: SIGNAL_TTL_MS,
-        });
-        return;
-      }
-    }
-
-    let effectiveTrade = trade;
-    let signalConfirmation: SignalConfirmationContext | null = null;
-    const signalLookup = getSignal(signalKey, now);
-    if (signalLookup.expired) {
-      console.log('[Signal Expired]', {
-        key: signalKey,
-        market: trade.market,
-        side: trade.side,
-        ttlMs: SIGNAL_TTL_MS,
-      });
-    }
-    const signal = signalLookup.signal;
-    if (signal) {
-      const signalAgeMs = now - signal.ts;
-      if (sourcePrice < 0.95) {
-        console.log('[Signal Ignored]', {
-          key: signalKey,
-          market: trade.market,
-          side: trade.side,
-          reason: 'source_price_below_0_95',
-          sourcePrice,
-          signalPrice: signal.price,
-          ageMs: signalAgeMs,
-        });
-      } else {
-        const boostedPrice = this.getSignalBoostPrice(trade, signal.price);
-        if (boostedPrice == null || boostedPrice < config.trading.minSourcePrice) {
-          console.log('[Signal Ignored]', {
-            key: signalKey,
-            market: trade.market,
-            side: trade.side,
-            reason: 'boosted_price_out_of_range',
-            sourcePrice,
-            signalPrice: signal.price,
-            boostedPrice,
-            ageMs: signalAgeMs,
-          });
-        } else {
-          effectiveTrade = {
-            ...trade,
-            price: boostedPrice,
-          };
-          signalConfirmation = {
-            ageMs: signalAgeMs,
-            signalPrice: signal.price,
-            confirmationPrice: sourcePrice,
-            entryPrice: boostedPrice,
-            signalSourceSize: signal.sourceSize,
-          };
-          deleteSignal(signalKey);
-          console.log('[Signal Confirmed]', {
-            key: signalKey,
-            market: trade.market,
-            side: trade.side,
-            ageMs: signalAgeMs,
-            signalPrice: signal.price,
-            confirmationPrice: sourcePrice,
-            entryPrice: boostedPrice,
-            signalSourceSize: signal.sourceSize,
-          });
-        }
-      }
-    }
-
-    const liquiditySymbolCheck = this.getLiquiditySymbolCheck(trade);
+    const liquiditySymbolCheck = this.getLiquiditySymbolCheck(effectiveTrade);
     const lightweightFilterResult = applyLightweightFilters(effectiveTrade, {
       now,
     });
@@ -744,10 +783,10 @@ class PolymarketCopyBot {
     }
 
     if (this.wsMonitor) {
-      await this.wsMonitor.subscribeToMarket(trade.tokenId);
+      await this.wsMonitor.subscribeToMarket(effectiveTrade.tokenId);
     }
 
-    const orderbook = await this.executor.getOrderbook(trade.tokenId);
+    const orderbook = await this.executor.getOrderbook(effectiveTrade.tokenId);
     const bestBidValue = Number(orderbook?.bids?.[0]?.price);
     const bestAskValue = Number(orderbook?.asks?.[0]?.price);
     const bestAskSize = Number(orderbook?.asks?.[0]?.size);
@@ -856,6 +895,19 @@ class PolymarketCopyBot {
       console.log(`⚠️  Risk check blocked trade: ${riskCheck.reason}`);
       this.printStats();
       return;
+    }
+
+    if (config.trading.enableSignalTrigger && signalConfirmation) {
+      consumeSignal(signalKey, now);
+      console.log('[Execution Trigger]', {
+        key: signalKey,
+        market: effectiveTrade.market,
+        side: effectiveTrade.side,
+        effectiveSignalPrice: signalConfirmation.effectiveSignalPrice,
+        cumulativeSourceUsd: signalConfirmation.cumulativeSourceUsd,
+        tradeCount: signalConfirmation.tradeCount,
+        copyNotional: riskTargetNotional,
+      });
     }
 
     if (signalMakerDecision.enabled && !config.trading.dryRun && signalMakerDecision.candidatePrice != null) {
