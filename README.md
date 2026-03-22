@@ -47,6 +47,7 @@ Edit `.env` and set at least:
 - `RPC_URL` — Polygon RPC URL (e.g. QuickNode)
 
 For a small demo, use modest sizing (e.g. `MAX_TRADE_SIZE=5`, `POSITION_MULTIPLIER=0.1`).
+For the current MVP execution path, keep `MAX_SOURCE_TRADE_AGE_MS` tight and require visible source-side ask liquidity before execution.
 
 ### 3. Run the bot
 

@@ -109,6 +109,13 @@ interface OrderbookLookupResult {
   asksDepth: number;
 }
 
+interface SourceSideResolution {
+  sourceOutcomeSide: 'UP' | 'DOWN';
+  expectedTokenId: string;
+  upTokenId: string;
+  downTokenId: string;
+}
+
 export interface CopyExecutionResult {
   orderId: string;
   copyNotional: number;
@@ -396,29 +403,25 @@ export class TradeExecutor {
   async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
     const PRICE_MATCH_EPSILON = 0.02;
     const sourcePrice = Number(originalTrade.price);
-    const defaultOutcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
-    const sourceOutcomeSide = this.normalizeOutcomeSide(originalTrade.outcomeName || originalTrade.outcome) || defaultOutcomeSide;
-    const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
+    const sourceResolution = await this.resolveSourceSideExecutionTarget(originalTrade);
     const fallbackResult = {
       trade: originalTrade,
       orderbook: null,
       bestBid: null,
       bestAsk: null,
       chosenTokenId: originalTrade.tokenId,
-      outcomeSide: sourceOutcomeSide,
+      outcomeSide: sourceResolution?.sourceOutcomeSide || (sourcePrice >= 0.5 ? 'UP' : 'DOWN'),
       slippage: null,
       asksDepth: 0,
       rejected: true,
       reason: 'market_outcome_map_missing',
     } satisfies ExecutionValidationResult;
 
-    const upTokenId = outcomeMap?.UP;
-    const downTokenId = outcomeMap?.DOWN;
-    if (!upTokenId || !downTokenId) {
+    if (!sourceResolution) {
       return fallbackResult;
     }
 
-    const expectedTokenId = sourceOutcomeSide === 'UP' ? upTokenId : downTokenId;
+    const { sourceOutcomeSide, expectedTokenId, upTokenId, downTokenId } = sourceResolution;
     const normalizedOriginalTokenId = String(originalTrade.tokenId || '').trim();
     console.log('[Execution Side Locked]', {
       market: originalTrade.market,
@@ -562,6 +565,86 @@ export class TradeExecutor {
       asksDepth: validationAsksDepth,
       rejected: false,
       path: 'direct_source_token',
+    };
+  }
+
+  async precheckSignalSourceSide(trade: Trade): Promise<{
+    ok: boolean;
+    trade: Trade;
+    reason?: string;
+    tokenId?: string;
+    bestAsk: number | null;
+    bestBid: number | null;
+  }> {
+    const sourceResolution = await this.resolveSourceSideExecutionTarget(trade);
+    if (!sourceResolution) {
+      return {
+        ok: false,
+        trade,
+        reason: 'market_outcome_map_missing',
+        tokenId: trade.tokenId,
+        bestAsk: null,
+        bestBid: null,
+      };
+    }
+
+    const { sourceOutcomeSide, expectedTokenId } = sourceResolution;
+    const lookup = await this.getOrderbookLookup(expectedTokenId, trade.market);
+    console.log('[Signal Precheck]', {
+      sourceSide: sourceOutcomeSide,
+      tokenId: expectedTokenId,
+      bestAsk: lookup.bestAsk,
+    });
+
+    const resolvedTrade: Trade = {
+      ...trade,
+      tokenId: expectedTokenId,
+      outcome: sourceOutcomeSide,
+      outcomeName: sourceOutcomeSide,
+    };
+
+    if (lookup.status === 'not_found' || lookup.bestAsk == null || lookup.bestAsk <= 0) {
+      console.log('[Signal Precheck Skip]', {
+        reason: 'no_ask_on_source_side',
+        sourceSide: sourceOutcomeSide,
+        tokenId: expectedTokenId,
+        bestAsk: lookup.bestAsk,
+      });
+      return {
+        ok: false,
+        trade: resolvedTrade,
+        reason: 'no_ask_on_source_side',
+        tokenId: expectedTokenId,
+        bestAsk: lookup.bestAsk,
+        bestBid: lookup.bestBid,
+      };
+    }
+
+    return {
+      ok: true,
+      trade: resolvedTrade,
+      tokenId: expectedTokenId,
+      bestAsk: lookup.bestAsk,
+      bestBid: lookup.bestBid,
+    };
+  }
+
+  private async resolveSourceSideExecutionTarget(originalTrade: Trade): Promise<SourceSideResolution | null> {
+    const sourcePrice = Number(originalTrade.price);
+    const defaultOutcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
+    const sourceOutcomeSide = this.normalizeOutcomeSide(originalTrade.outcomeName || originalTrade.outcome) || defaultOutcomeSide;
+    const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
+    const upTokenId = outcomeMap?.UP;
+    const downTokenId = outcomeMap?.DOWN;
+    if (!upTokenId || !downTokenId) {
+      return null;
+    }
+
+    return {
+      sourceOutcomeSide,
+      expectedTokenId: sourceOutcomeSide === 'UP' ? upTokenId : downTokenId,
+      upTokenId,
+      downTokenId,
     };
   }
 
@@ -1655,6 +1738,23 @@ export class TradeExecutor {
     return Math.abs(candidatePrice - referencePrice) / referencePrice * 10000;
   }
 
+  private getAvailableAskNotional(orderbook: any, targetNotional: number): number {
+    const asks = Array.isArray(orderbook?.asks) ? orderbook.asks : [];
+    let availableNotional = 0;
+    for (const ask of asks) {
+      const price = Number(ask?.price);
+      const size = Number(ask?.size);
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(size) || size <= 0) {
+        continue;
+      }
+      availableNotional += price * size;
+      if (availableNotional >= targetNotional) {
+        return availableNotional;
+      }
+    }
+    return availableNotional;
+  }
+
   private async buildNoAsksFallbackPlan(
     originalTrade: Trade,
     orderbook: any
@@ -1919,6 +2019,20 @@ export class TradeExecutor {
           reason: 'no_ask_on_source_side',
         });
         throw new Error(attempt.attempt === 1 ? 'no_ask_on_source_side' : 'no_liquidity');
+      }
+
+      const availableAskNotional = this.getAvailableAskNotional(refreshedBook.orderbook, copyNotional);
+      console.log('[Execution Depth Check]', {
+        copyNotional,
+        availableAskNotional,
+      });
+      if (availableAskNotional < copyNotional) {
+        console.log('[Execution Depth Check Skip]', {
+          reason: 'insufficient_source_ask_depth',
+          copyNotional,
+          availableAskNotional,
+        });
+        throw new Error('insufficient_source_ask_depth');
       }
 
       const priceDriftBps = this.getPriceGapBps(Number(originalTrade.price), refreshedBook.bestAsk);

@@ -79,7 +79,7 @@ export const config = {
     mvpMaxPriceDriftBps: parseNumber(process.env.MVP_MAX_PRICE_DRIFT_BPS, 20),
     minSourcePrice: parseNumber(process.env.MIN_SOURCE_PRICE, 0.97),
     maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
-    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 30000),
+    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 12000),
     minSourceTradeUsd: parseNumber(process.env.MIN_SOURCE_TRADE_USD, 2),
     maxUsdPerOrder: parseNumber(process.env.MAX_USD_PER_ORDER, 3),
     marketScope: process.env.MARKET_SCOPE || 'crypto-only',

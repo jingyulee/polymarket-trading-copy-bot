@@ -773,6 +773,41 @@ class PolymarketCopyBot {
     const sourcePrice = Number(trade.price);
     const sourceSizeUsd = Number(trade.size);
     const signalKey = getSignalKey(trade);
+    if (config.trading.marketScope === 'crypto-only') {
+      const marketTitle = trade.title || trade.market || trade.question || null;
+      const marketClassification = classifyCryptoMarket({
+        marketTitle,
+        marketSlug: trade.marketSlug,
+        cryptoKeywords: config.trading.cryptoKeywords,
+      });
+      console.log('[Crypto Market Classification]', {
+        marketTitle: trade.title || trade.market || trade.question || null,
+        marketSlug: trade.marketSlug || null,
+        isCrypto: marketClassification.isCrypto,
+        matchedSymbol: marketClassification.matchedSymbol,
+        matchedKeyword: marketClassification.matchedKeyword,
+        matchedField: marketClassification.matchedField,
+        reason: marketClassification.reason,
+      });
+      console.log('[Market Scope]', {
+        marketTitle,
+        marketSlug: trade.marketSlug || null,
+        matchedSymbol: marketClassification.matchedSymbol,
+        matchedKeyword: marketClassification.matchedKeyword,
+        matchedField: marketClassification.matchedField,
+        result: marketClassification.isCrypto ? 'crypto' : 'non_crypto',
+        reason: marketClassification.reason,
+      });
+      if (!marketClassification.isCrypto) {
+        this.handleTradeSkip(trade, {
+          reason: 'non_crypto_market',
+          sourceAgeMs,
+          marketLockKey: getMarketLockKey(trade),
+        });
+        this.printStats();
+        return;
+      }
+    }
     const signalCaptureEligible = config.trading.enableSignalTrigger && this.canCaptureSignalTrade(trade, sourceAgeMs);
 
     console.log('\n' + '='.repeat(50));
@@ -814,7 +849,7 @@ class PolymarketCopyBot {
         ageMs: Math.max(0, now - activeSignal.firstTs),
       });
 
-      signalConfirmation = this.getFastSignalConfirmation({
+      const candidateSignalConfirmation = this.getFastSignalConfirmation({
         trade,
         signal: activeSignal,
         now,
@@ -822,17 +857,29 @@ class PolymarketCopyBot {
         sourcePrice,
         sourceSizeUsd,
       }) || this.getSignalConfirmation(activeSignal, now);
-      if (signalConfirmation) {
-        effectiveTrade = {
+      if (candidateSignalConfirmation) {
+        const candidateTrade: Trade = {
           ...trade,
           market: activeSignal.latestMarketTitle || trade.market,
           marketSlug: activeSignal.latestMarketSlug || trade.marketSlug,
           tokenId: activeSignal.latestTokenId || trade.tokenId,
-          outcome: activeSignal.latestOutcome || trade.outcome,
-          outcomeName: activeSignal.latestOutcome || trade.outcomeName,
-          price: signalConfirmation.effectiveSignalPrice,
-          size: Math.max(trade.size, signalConfirmation.cumulativeSourceUsd),
+          outcome: activeSignal.latestOutcome || trade.outcome || trade.outcomeName,
+          outcomeName: activeSignal.latestOutcome || trade.outcomeName || trade.outcome,
+          price: candidateSignalConfirmation.effectiveSignalPrice,
+          size: Math.max(trade.size, candidateSignalConfirmation.cumulativeSourceUsd),
         };
+        const signalPrecheck = await this.executor.precheckSignalSourceSide(candidateTrade);
+        if (!signalPrecheck.ok) {
+          this.handleTradeSkip(trade, {
+            reason: signalPrecheck.reason || 'no_ask_on_source_side',
+            sourceAgeMs,
+            marketLockKey: getMarketLockKey(signalPrecheck.trade),
+          });
+          this.printStats();
+          return;
+        }
+        signalConfirmation = candidateSignalConfirmation;
+        effectiveTrade = signalPrecheck.trade;
         if (signalConfirmation.fastTrigger) {
           console.log('[Signal Fast Trigger]', {
             market: effectiveTrade.market,
