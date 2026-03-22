@@ -911,6 +911,17 @@ class PolymarketCopyBot {
     executionValidation = await this.executor.validateExecutionTarget(effectiveTrade);
     effectiveTrade = executionValidation.trade;
     const marketLockKey = getMarketLockKey(effectiveTrade);
+    const sourceOutcomeSide = String(trade.outcomeName || trade.outcome || '').trim().toUpperCase();
+    const executionOutcomeSide = String(effectiveTrade.outcomeName || effectiveTrade.outcome || '').trim().toUpperCase();
+    if (sourceOutcomeSide && executionOutcomeSide && sourceOutcomeSide !== executionOutcomeSide) {
+      this.handleTradeSkip(trade, {
+        reason: 'execution_side_mismatch_bug',
+        sourceAgeMs,
+        marketLockKey,
+      });
+      this.printStats();
+      return;
+    }
     if (executionValidation.rejected) {
       if (executionValidation.reason === 'wrong_token_side_detected' && executionValidation.chosenTokenId) {
         console.log('[Execution Validation Bypassed]', {
@@ -1120,7 +1131,7 @@ class PolymarketCopyBot {
         executionSide: executionValidation?.outcomeSide || effectiveTrade.outcome,
         executionTokenId: effectiveTrade.tokenId,
         copyNotional: riskTargetNotional,
-        path: executionValidation?.path || 'direct_source_token',
+        path: 'direct_source_token',
       });
       console.log('[Execution Trigger]', {
         key: signalKey,
@@ -1318,6 +1329,10 @@ class PolymarketCopyBot {
       copyNotional?: number;
     }
   ): void {
+    const sourceSide = String(trade.outcomeName || trade.outcome || 'UNKNOWN').trim().toUpperCase();
+    const executionSide = sourceSide;
+    const sourceTokenId = String(trade.tokenId || '');
+    const executionTokenId = sourceTokenId;
     logTrade({
       ts: trade.timestamp || Date.now(),
       market: trade.market,
@@ -1328,7 +1343,7 @@ class PolymarketCopyBot {
       sourceSizeUsd: trade.size,
       sourceAgeMs: params.sourceAgeMs,
       action: params.action,
-      reason: params.reason,
+      reason: `${params.reason} | source_side=${sourceSide} execution_side=${executionSide} source_token_id=${sourceTokenId} execution_token_id=${executionTokenId}`,
       orderId: params.orderId,
       fillPrice: params.fillPrice,
       fillSize: params.fillSize,

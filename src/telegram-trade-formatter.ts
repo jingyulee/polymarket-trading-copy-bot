@@ -65,9 +65,13 @@ export function formatTradeMessage(
     fillSize?: number;
     sourceAgeMs: number;
     reason?: string;
+    sourceSide?: string;
+    executionSide?: string;
   }
 ): string {
   const sourceAgeSec = Math.max(0, options.sourceAgeMs) / 1000;
+  const sourceSide = String(options.sourceSide || trade.outcome || trade.outcomeName || 'UNKNOWN').trim().toUpperCase();
+  const executionSide = String(options.executionSide || sourceSide).trim().toUpperCase();
 
   const lines = [
     formatHeader(options.mode, options.decision),
@@ -82,6 +86,8 @@ export function formatTradeMessage(
   lines.push(
     '',
     formatSideLine(trade),
+    `Source Side: ${sourceSide}`,
+    `Execution Side: ${executionSide}`,
     formatRiskLine(Number(trade.price || 0)),
     '',
     `💰 Copy: ${options.copyNotional.toFixed(2)} USDC`,

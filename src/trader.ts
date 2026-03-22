@@ -96,7 +96,7 @@ export interface ExecutionValidationResult {
   asksDepth: number;
   rejected: boolean;
   reason?: string;
-  path?: 'direct_source_token' | 'complement_token_execution';
+  path?: 'direct_source_token';
 }
 
 interface OrderbookLookupResult {
@@ -397,6 +397,7 @@ export class TradeExecutor {
     const PRICE_MATCH_EPSILON = 0.02;
     const sourcePrice = Number(originalTrade.price);
     const defaultOutcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
+    const sourceOutcomeSide = this.normalizeOutcomeSide(originalTrade.outcomeName || originalTrade.outcome) || defaultOutcomeSide;
     const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
     const fallbackResult = {
       trade: originalTrade,
@@ -404,7 +405,7 @@ export class TradeExecutor {
       bestBid: null,
       bestAsk: null,
       chosenTokenId: originalTrade.tokenId,
-      outcomeSide: defaultOutcomeSide,
+      outcomeSide: sourceOutcomeSide,
       slippage: null,
       asksDepth: 0,
       rejected: true,
@@ -417,78 +418,40 @@ export class TradeExecutor {
       return fallbackResult;
     }
 
-    const [upLookup, downLookup] = await Promise.all([
-      this.getOrderbookLookup(upTokenId, originalTrade.market),
-      this.getOrderbookLookup(downTokenId, originalTrade.market),
-    ]);
+    const expectedTokenId = sourceOutcomeSide === 'UP' ? upTokenId : downTokenId;
     const normalizedOriginalTokenId = String(originalTrade.tokenId || '').trim();
-    const sourceLookup = normalizedOriginalTokenId === downTokenId
-      ? downLookup
-      : upLookup;
-    const oppositeLookup = sourceLookup.tokenId === upTokenId ? downLookup : upLookup;
-    const sourceOutcomeSide: 'UP' | 'DOWN' = sourceLookup.tokenId === upTokenId ? 'UP' : 'DOWN';
-    const oppositeOutcomeSide: 'UP' | 'DOWN' = sourceOutcomeSide === 'UP' ? 'DOWN' : 'UP';
-    const complementTargetPrice = sourcePrice > 0 ? 1 - sourcePrice : null;
-    const sourceAskMatches = sourceLookup.bestAsk != null && Math.abs(sourceLookup.bestAsk - sourcePrice) <= PRICE_MATCH_EPSILON;
-    const oppositeAskMatches = complementTargetPrice != null &&
-      oppositeLookup.bestAsk != null &&
-      Math.abs(oppositeLookup.bestAsk - complementTargetPrice) <= PRICE_MATCH_EPSILON;
-    const sourceHasExtremeBid = sourceLookup.bestBid != null && sourceLookup.bestBid <= 0.01;
-    const oppositeHasReasonableAsk = oppositeLookup.bestAsk != null && oppositeLookup.bestAsk > 0 && oppositeLookup.bestAsk < 1;
+    console.log('[Execution Side Locked]', {
+      market: originalTrade.market,
+      sourceSide: sourceOutcomeSide,
+      sourceTokenId: normalizedOriginalTokenId || null,
+      expectedTokenId,
+      outcomeMapUpTokenId: upTokenId,
+      outcomeMapDownTokenId: downTokenId,
+    });
 
-    let selectedLookup: OrderbookLookupResult | null = null;
-    let selectedOutcomeSide: 'UP' | 'DOWN' = sourceOutcomeSide;
-    let selectedPath: 'direct_source_token' | 'complement_token_execution' = 'direct_source_token';
-    let selectionReason = 'no_viable_book';
-
-    if (sourceAskMatches) {
-      selectedLookup = sourceLookup;
-      selectedOutcomeSide = sourceOutcomeSide;
-      selectedPath = 'direct_source_token';
-      selectionReason = 'direct_book_match';
-    } else if (oppositeAskMatches) {
-      selectedLookup = oppositeLookup;
-      selectedOutcomeSide = oppositeOutcomeSide;
-      selectedPath = 'complement_token_execution';
-      selectionReason = 'book_driven_complement_execution';
-    } else if (sourceLookup.bestAsk == null && sourceHasExtremeBid && oppositeHasReasonableAsk) {
-      selectedLookup = oppositeLookup;
-      selectedOutcomeSide = oppositeOutcomeSide;
-      selectedPath = 'complement_token_execution';
-      selectionReason = 'book_driven_complement_execution';
-    }
-
-    if (selectedLookup && selectedLookup.tokenId !== sourceLookup.tokenId) {
-      console.log('[Execution Side Switched]', {
+    if (normalizedOriginalTokenId && normalizedOriginalTokenId !== expectedTokenId) {
+      console.log('[Execution Validation]', {
         market: originalTrade.market,
         sourceSide: sourceOutcomeSide,
-        sourceTokenId: sourceLookup.tokenId,
-        sourcePrice,
-        executionTokenId: selectedLookup.tokenId,
-        executionSide: selectedOutcomeSide,
-        reason: 'book_driven_complement_execution',
-        sourceBestBid: sourceLookup.bestBid,
-        sourceBestAsk: sourceLookup.bestAsk,
-        oppositeBestBid: oppositeLookup.bestBid,
-        oppositeBestAsk: oppositeLookup.bestAsk,
+        expectedTokenId,
+        bestAsk: null,
+        bestBid: null,
+        skipReason: 'source_execution_side_mismatch',
       });
-    } else if (selectedLookup) {
-      console.log('[Execution Side Preserved]', {
-        market: originalTrade.market,
-        sourceSide: sourceOutcomeSide,
-        sourceTokenId: sourceLookup.tokenId,
-        sourcePrice,
-        executionTokenId: selectedLookup.tokenId,
-        executionSide: selectedOutcomeSide,
-        reason: 'direct_book_match',
-      });
+      return {
+        ...fallbackResult,
+        chosenTokenId: expectedTokenId,
+        outcomeSide: sourceOutcomeSide,
+        reason: 'source_execution_side_mismatch',
+      };
     }
 
-    const validationChosenTokenId = selectedLookup?.tokenId || sourceLookup.tokenId;
-    const validationBestBid = selectedLookup?.bestBid ?? sourceLookup.bestBid;
-    const validationBestAsk = selectedLookup?.bestAsk ?? sourceLookup.bestAsk;
-    const validationAsksDepth = selectedLookup?.asksDepth ?? sourceLookup.asksDepth;
-    const validationPassed = Boolean(selectedLookup);
+    const expectedLookup = await this.getOrderbookLookup(expectedTokenId, originalTrade.market);
+    const validationChosenTokenId = expectedTokenId;
+    const validationBestBid = expectedLookup.bestBid;
+    const validationBestAsk = expectedLookup.bestAsk;
+    const validationAsksDepth = expectedLookup.asksDepth;
+    const validationPassed = expectedLookup.bestAsk != null && Math.abs(expectedLookup.bestAsk - sourcePrice) <= PRICE_MATCH_EPSILON;
     const slippage = validationBestAsk != null && sourcePrice > 0
       ? (validationBestAsk - sourcePrice) / sourcePrice
       : null;
@@ -496,39 +459,41 @@ export class TradeExecutor {
     const validatedTrade: Trade = {
       ...originalTrade,
       tokenId: validationChosenTokenId,
-      outcome: selectedOutcomeSide,
-      outcomeName: selectedOutcomeSide,
+      outcome: sourceOutcomeSide,
+      outcomeName: sourceOutcomeSide,
     };
 
     console.log('[Execution Validation]', {
       sourcePrice,
-      chosenSide: selectedOutcomeSide,
+      chosenSide: sourceOutcomeSide,
       chosenTokenId: validationChosenTokenId,
       chosenBestBid: validationBestBid,
       chosenBestAsk: validationBestAsk,
-      oppositeBestBid: selectedLookup?.tokenId === oppositeLookup.tokenId ? sourceLookup.bestBid : oppositeLookup.bestBid,
-      oppositeBestAsk: selectedLookup?.tokenId === oppositeLookup.tokenId ? sourceLookup.bestAsk : oppositeLookup.bestAsk,
-      complementTargetPrice,
-      directAskMatches: sourceAskMatches,
-      oppositeBidMatches: false,
-      directBidFallback: false,
+      oppositeBestBid: null,
+      oppositeBestAsk: null,
+      directAskMatches: validationPassed,
       validationPassed,
-      validationReason: selectionReason,
+      validationReason: validationPassed ? 'source_side_ask_match' : 'source_side_locked',
     });
 
     console.log('[Execution Decision]', {
       sourcePrice,
-      chosenSide: selectedOutcomeSide,
+      chosenSide: sourceOutcomeSide,
       tokenId: validationChosenTokenId,
       bestBid: validationBestBid,
       bestAsk: validationBestAsk,
       slippage,
     });
 
-    const bothBooksMissing = upLookup.status === 'not_found' && downLookup.status === 'not_found';
-    const anyBookMissing = upLookup.status === 'not_found' || downLookup.status === 'not_found';
-
-    if (!validationPassed && bothBooksMissing) {
+    if (expectedLookup.status === 'not_found') {
+      console.log('[Execution Validation]', {
+        market: originalTrade.market,
+        sourceSide: sourceOutcomeSide,
+        expectedTokenId,
+        bestAsk: validationBestAsk,
+        bestBid: validationBestBid,
+        skipReason: 'no_orderbook_on_source_side',
+      });
       return {
         ...fallbackResult,
         trade: validatedTrade,
@@ -538,49 +503,65 @@ export class TradeExecutor {
         chosenTokenId: validationChosenTokenId,
         slippage,
         asksDepth: validationAsksDepth,
-        reason: 'orderbook_not_found',
+        reason: 'no_orderbook_on_source_side',
       };
     }
 
-    if (!validationPassed && anyBookMissing) {
+    if (validationAsksDepth === 0 || validationBestAsk == null || validationBestAsk <= 0) {
+      console.log('[Execution Validation]', {
+        market: originalTrade.market,
+        sourceSide: sourceOutcomeSide,
+        expectedTokenId,
+        bestAsk: validationBestAsk,
+        bestBid: validationBestBid,
+        skipReason: 'no_ask_on_source_side',
+      });
       return {
         ...fallbackResult,
         trade: validatedTrade,
-        orderbook: null,
+        orderbook: expectedLookup.orderbook || null,
         bestBid: validationBestBid,
         bestAsk: validationBestAsk,
         chosenTokenId: validationChosenTokenId,
         slippage,
         asksDepth: validationAsksDepth,
-        reason: 'orderbook_not_found',
+        reason: 'no_ask_on_source_side',
       };
     }
 
-    if (!selectedLookup || validationAsksDepth === 0 || validationBestAsk == null || validationBestAsk <= 0) {
+    if (!validationPassed) {
+      console.log('[Execution Validation]', {
+        market: originalTrade.market,
+        sourceSide: sourceOutcomeSide,
+        expectedTokenId,
+        bestAsk: validationBestAsk,
+        bestBid: validationBestBid,
+        skipReason: 'source_side_price_mismatch',
+      });
       return {
         ...fallbackResult,
         trade: validatedTrade,
-        orderbook: selectedLookup?.orderbook || null,
+        orderbook: expectedLookup.orderbook || null,
         bestBid: validationBestBid,
         bestAsk: validationBestAsk,
         chosenTokenId: validationChosenTokenId,
         slippage,
         asksDepth: validationAsksDepth,
-        reason: 'no_liquidity',
+        reason: 'source_side_price_mismatch',
       };
     }
 
     return {
       trade: validatedTrade,
-      orderbook: selectedLookup.orderbook,
+      orderbook: expectedLookup.orderbook,
       bestBid: validationBestBid,
       bestAsk: validationBestAsk,
       chosenTokenId: validationChosenTokenId,
-      outcomeSide: selectedOutcomeSide,
+      outcomeSide: sourceOutcomeSide,
       slippage,
       asksDepth: validationAsksDepth,
       rejected: false,
-      path: selectedPath,
+      path: 'direct_source_token',
     };
   }
 
