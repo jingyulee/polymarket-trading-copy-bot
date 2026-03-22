@@ -3,7 +3,7 @@ import axios from 'axios';
 import { ClobClient, Side, OrderType, AssetType } from '@polymarket/clob-client';
 import { config } from './config.js';
 import type { Trade } from './monitor.js';
-import { logTrade } from './db.js';
+import { findOutcomeMapCache, logTrade, upsertOutcomeMapCache } from './db.js';
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
 const GAMMA_MARKETS_URL = 'https://gamma-api.polymarket.com/markets';
@@ -76,13 +76,24 @@ interface UnreplicableNoAskMarketResult {
   asksDepth: number;
 }
 
+interface OutcomeTokenMap {
+  conditionId?: string | null;
+  marketSlug?: string | null;
+  UP?: string;
+  DOWN?: string;
+  complete?: boolean;
+  updatedAt?: number;
+}
+
 export interface ExecutionValidationResult {
   trade: Trade;
   orderbook: any | null;
   bestBid: number | null;
   bestAsk: number | null;
   chosenTokenId: string;
-  outcomeSide: 'YES_UP' | 'NO_DOWN';
+  outcomeSide: 'UP' | 'DOWN';
+  slippage: number | null;
+  asksDepth: number;
   rejected: boolean;
   reason?: string;
 }
@@ -113,6 +124,8 @@ export class TradeExecutor {
   private apiCreds?: { apiKey: string; secret: string; passphrase: string };
   private marketCache: Map<string, MarketMetadata> = new Map();
   private orderbookCache = new Map<string, OrderbookCacheEntry>();
+  private outcomeMapByConditionId = new Map<string, OutcomeTokenMap>();
+  private outcomeMapByMarketSlug = new Map<string, OutcomeTokenMap>();
   private activeMarketsCache?: ActiveMarketsCacheEntry;
   private warnedMissingOutcomeMappings = new Set<string>();
   private readonly CACHE_TTL = 3600000;
@@ -370,68 +383,146 @@ export class TradeExecutor {
   }
 
   async validateExecutionTarget(originalTrade: Trade): Promise<ExecutionValidationResult> {
-    const outcomeSide: 'YES_UP' | 'NO_DOWN' = Number(originalTrade.price) >= 0.5 ? 'YES_UP' : 'NO_DOWN';
-    const candidateTokenIds = await this.resolveExecutionCandidateTokenIds(originalTrade);
-    let chosenTokenId = originalTrade.tokenId;
-    let chosenOrderbook: any | null = null;
-    let chosenBestBid: number | null = null;
-    let chosenBestAsk: number | null = null;
-    let bestScore = Number.POSITIVE_INFINITY;
+    const sourcePrice = Number(originalTrade.price);
+    const outcomeSide: 'UP' | 'DOWN' = sourcePrice >= 0.5 ? 'UP' : 'DOWN';
+    const outcomeMap = await this.getOutcomeMapForTrade(originalTrade);
+    const fallbackResult = {
+      trade: originalTrade,
+      orderbook: null,
+      bestBid: null,
+      bestAsk: null,
+      chosenTokenId: originalTrade.tokenId,
+      outcomeSide,
+      slippage: null,
+      asksDepth: 0,
+      rejected: true,
+      reason: 'market_outcome_map_missing',
+    } satisfies ExecutionValidationResult;
 
-    for (const tokenId of candidateTokenIds) {
-      const orderbook = await this.getOrderbook(tokenId);
-      const bestBidValue = Number(orderbook?.bids?.[0]?.price);
-      const bestAskValue = Number(orderbook?.asks?.[0]?.price);
-      const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
-      const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
-      const bidScore = bestBid == null ? Number.POSITIVE_INFINITY : Math.abs(bestBid - Number(originalTrade.price));
-      const askScore = bestAsk == null ? Number.POSITIVE_INFINITY : Math.abs(bestAsk - Number(originalTrade.price));
-      const score = Math.min(bidScore, askScore);
-
-      if (score < bestScore) {
-        bestScore = score;
-        chosenTokenId = tokenId;
-        chosenOrderbook = orderbook;
-        chosenBestBid = bestBid;
-        chosenBestAsk = bestAsk;
-      }
+    const upTokenId = outcomeMap?.UP;
+    const downTokenId = outcomeMap?.DOWN;
+    if (!upTokenId || !downTokenId) {
+      return fallbackResult;
     }
 
-    const chosenOutcome = await this.getOutcomeLabel(chosenTokenId);
+    const [orderbookUp, orderbookDown] = await Promise.all([
+      this.getOrderbook(upTokenId),
+      this.getOrderbook(downTokenId),
+    ]);
+
+    const chosenTokenId = outcomeSide === 'UP' ? upTokenId : downTokenId;
+    const chosenOrderbook = outcomeSide === 'UP' ? orderbookUp : orderbookDown;
+    const bestBidValue = Number(chosenOrderbook?.bids?.[0]?.price);
+    const bestAskValue = Number(chosenOrderbook?.asks?.[0]?.price);
+    const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
+    const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
+    const asksDepth = Array.isArray(chosenOrderbook?.asks) ? chosenOrderbook.asks.length : 0;
+    const slippage = bestAsk != null && sourcePrice > 0
+      ? (bestAsk - sourcePrice) / sourcePrice
+      : null;
+
     const validatedTrade: Trade = {
       ...originalTrade,
       tokenId: chosenTokenId,
-      outcome: chosenOutcome,
-      outcomeName: chosenOutcome,
+      outcome: outcomeSide,
+      outcomeName: outcomeSide,
     };
 
     console.log('[Execution Validation]', {
-      sourcePrice: originalTrade.price,
-      bestBid: chosenBestBid,
+      sourcePrice,
+      bestBid,
       chosenTokenId,
       outcomeSide,
     });
 
-    if (chosenBestBid == null || Math.abs(chosenBestBid - Number(originalTrade.price)) > 0.1) {
+    console.log('[Execution Decision]', {
+      sourcePrice,
+      chosenSide: outcomeSide,
+      tokenId: chosenTokenId,
+      bestBid,
+      bestAsk,
+      slippage,
+    });
+
+    if (bestBid == null || Math.abs(bestBid - sourcePrice) > 0.1) {
       return {
+        ...fallbackResult,
         trade: validatedTrade,
         orderbook: chosenOrderbook,
-        bestBid: chosenBestBid,
-        bestAsk: chosenBestAsk,
+        bestBid,
+        bestAsk,
         chosenTokenId,
-        outcomeSide,
-        rejected: true,
-        reason: 'wrong_token_side_validation_failed',
+        slippage,
+        asksDepth,
+        reason: 'wrong_token_side_detected',
+      };
+    }
+
+    if (asksDepth === 0) {
+      return {
+        ...fallbackResult,
+        trade: validatedTrade,
+        orderbook: chosenOrderbook,
+        bestBid,
+        bestAsk,
+        chosenTokenId,
+        slippage,
+        asksDepth,
+        reason: 'no_liquidity',
+      };
+    }
+
+    if (bestAsk == null || bestAsk <= 0) {
+      return {
+        ...fallbackResult,
+        trade: validatedTrade,
+        orderbook: chosenOrderbook,
+        bestBid,
+        bestAsk,
+        chosenTokenId,
+        slippage,
+        asksDepth,
+        reason: 'no_ask_price',
+      };
+    }
+
+    if (slippage == null || slippage > 0.001) {
+      return {
+        ...fallbackResult,
+        trade: validatedTrade,
+        orderbook: chosenOrderbook,
+        bestBid,
+        bestAsk,
+        chosenTokenId,
+        slippage,
+        asksDepth,
+        reason: 'slippage_too_high',
+      };
+    }
+
+    if (bestBid != null && bestBid < 0.01 && sourcePrice > 0.9) {
+      return {
+        ...fallbackResult,
+        trade: validatedTrade,
+        orderbook: chosenOrderbook,
+        bestBid,
+        bestAsk,
+        chosenTokenId,
+        slippage,
+        asksDepth,
+        reason: 'wrong_orderbook_side',
       };
     }
 
     return {
       trade: validatedTrade,
       orderbook: chosenOrderbook,
-      bestBid: chosenBestBid,
-      bestAsk: chosenBestAsk,
+      bestBid,
+      bestAsk,
       chosenTokenId,
       outcomeSide,
+      slippage,
+      asksDepth,
       rejected: false,
     };
   }
@@ -456,6 +547,259 @@ export class TradeExecutor {
     } catch {
       return undefined;
     }
+  }
+
+  seedOutcomeMapFromTrade(trade: Pick<Trade, 'conditionId' | 'marketSlug' | 'outcome' | 'outcomeName' | 'tokenId'>): void {
+    const normalizedOutcome = this.normalizeOutcomeSide(trade.outcomeName || trade.outcome);
+    const tokenId = String(trade.tokenId || '').trim();
+    const conditionId = String(trade.conditionId || '').trim();
+    const marketSlug = String(trade.marketSlug || '').trim().toLowerCase();
+
+    if (!normalizedOutcome || !tokenId || (!conditionId && !marketSlug)) {
+      return;
+    }
+
+    const existing = this.getCachedOutcomeMap(conditionId, marketSlug) || {};
+    const nextMap: OutcomeTokenMap = {
+      ...existing,
+      conditionId: conditionId || existing.conditionId || null,
+      marketSlug: marketSlug || existing.marketSlug || null,
+      [normalizedOutcome]: tokenId,
+      updatedAt: Date.now(),
+    };
+    nextMap.complete = Boolean(nextMap.UP && nextMap.DOWN);
+
+    this.storeOutcomeMap(nextMap, conditionId || null, marketSlug || null);
+    console.log('[Outcome Map Partial Seeded]', {
+      conditionId: conditionId || null,
+      marketSlug: marketSlug || null,
+      seededSide: normalizedOutcome,
+      tokenId,
+      complete: Boolean(nextMap.UP && nextMap.DOWN),
+    });
+  }
+
+  private getCachedOutcomeMap(conditionId?: string | null, marketSlug?: string | null): OutcomeTokenMap | null {
+    const normalizedConditionId = String(conditionId || '').trim();
+    const normalizedMarketSlug = String(marketSlug || '').trim().toLowerCase();
+
+    if (normalizedConditionId) {
+      const byCondition = this.outcomeMapByConditionId.get(normalizedConditionId);
+      if (byCondition) {
+        console.log('[Outcome Map Cache Hit]', {
+          keyType: 'condition_id',
+          key: normalizedConditionId,
+          complete: Boolean(byCondition.UP && byCondition.DOWN),
+        });
+        return byCondition;
+      }
+    }
+
+    if (normalizedMarketSlug) {
+      const bySlug = this.outcomeMapByMarketSlug.get(normalizedMarketSlug);
+      if (bySlug) {
+        console.log('[Outcome Map Cache Hit]', {
+          keyType: 'market_slug',
+          key: normalizedMarketSlug,
+          complete: Boolean(bySlug.UP && bySlug.DOWN),
+        });
+        return bySlug;
+      }
+    }
+
+    const persisted = findOutcomeMapCache(normalizedConditionId || null, normalizedMarketSlug || null);
+    if (!persisted) {
+      return null;
+    }
+
+    const outcomeMap: OutcomeTokenMap = {
+      conditionId: persisted.conditionId || null,
+      marketSlug: persisted.marketSlug || null,
+      UP: persisted.upTokenId || undefined,
+      DOWN: persisted.downTokenId || undefined,
+      complete: Boolean(persisted.upTokenId && persisted.downTokenId),
+      updatedAt: persisted.updatedTs,
+    };
+    this.storeOutcomeMap(outcomeMap, persisted.conditionId || null, persisted.marketSlug || null, false);
+    console.log('[Outcome Map Cache Hit]', {
+      keyType: persisted.conditionId ? 'condition_id' : 'market_slug',
+      key: persisted.conditionId || persisted.marketSlug,
+      complete: Boolean(outcomeMap.UP && outcomeMap.DOWN),
+      source: 'persistent',
+    });
+    return outcomeMap;
+  }
+
+  private storeOutcomeMap(
+    outcomeMap: OutcomeTokenMap,
+    conditionId?: string | null,
+    marketSlug?: string | null,
+    persist: boolean = true
+  ): void {
+    const normalizedConditionId = String(conditionId || '').trim();
+    const normalizedMarketSlug = String(marketSlug || '').trim().toLowerCase();
+    const normalizedOutcomeMap: OutcomeTokenMap = {
+      ...outcomeMap,
+      conditionId: normalizedConditionId || outcomeMap.conditionId || null,
+      marketSlug: normalizedMarketSlug || outcomeMap.marketSlug || null,
+      updatedAt: outcomeMap.updatedAt || Date.now(),
+    };
+    normalizedOutcomeMap.complete = Boolean(normalizedOutcomeMap.UP && normalizedOutcomeMap.DOWN);
+
+    if (normalizedConditionId) {
+      this.outcomeMapByConditionId.set(normalizedConditionId, normalizedOutcomeMap);
+    }
+    if (normalizedMarketSlug) {
+      this.outcomeMapByMarketSlug.set(normalizedMarketSlug, normalizedOutcomeMap);
+    }
+
+    if (persist) {
+      upsertOutcomeMapCache({
+        conditionId: normalizedOutcomeMap.conditionId || null,
+        marketSlug: normalizedOutcomeMap.marketSlug || null,
+        upTokenId: normalizedOutcomeMap.UP || null,
+        downTokenId: normalizedOutcomeMap.DOWN || null,
+        updatedTs: normalizedOutcomeMap.updatedAt || Date.now(),
+      });
+    }
+  }
+
+  private async getOutcomeMapForTrade(trade: Pick<Trade, 'conditionId' | 'marketSlug'>): Promise<OutcomeTokenMap | null> {
+    const conditionId = String(trade.conditionId || '').trim();
+    const marketSlug = String(trade.marketSlug || '').trim().toLowerCase();
+
+    const cached = this.getCachedOutcomeMap(conditionId || null, marketSlug || null);
+    if (cached?.UP && cached?.DOWN) {
+      return cached;
+    }
+
+    const resolved = await this.resolveOutcomeMapForTrade(trade, cached || {});
+    if (!resolved?.UP || !resolved?.DOWN) {
+      console.log('[Outcome Map Missing]', {
+        conditionId: conditionId || null,
+        marketSlug: marketSlug || null,
+      });
+      return resolved && (resolved.UP || resolved.DOWN) ? resolved : null;
+    }
+
+    console.log('[Outcome Map Resolved]', {
+      conditionId: conditionId || null,
+      marketSlug: marketSlug || null,
+      upTokenId: resolved.UP,
+      downTokenId: resolved.DOWN,
+    });
+    return resolved;
+  }
+
+  private async resolveOutcomeMapForTrade(
+    trade: Pick<Trade, 'conditionId' | 'marketSlug'>,
+    baseMap: OutcomeTokenMap
+  ): Promise<OutcomeTokenMap | null> {
+    const conditionId = String(trade.conditionId || '').trim();
+    const marketSlug = String(trade.marketSlug || '').trim().toLowerCase();
+    if (!conditionId && !marketSlug) {
+      return null;
+    }
+
+    const queryVariants = [
+      conditionId ? { condition_id: conditionId, limit: 5 } : null,
+      conditionId ? { conditionId, limit: 5 } : null,
+      marketSlug ? { slug: marketSlug, limit: 5 } : null,
+      marketSlug ? { market_slug: marketSlug, limit: 5 } : null,
+    ].filter(Boolean) as Array<Record<string, string | number>>;
+
+    for (const params of queryVariants) {
+      try {
+        console.log('[Outcome Map Lookup Start]', {
+          conditionId: conditionId || null,
+          marketSlug: marketSlug || null,
+          params,
+        });
+        const { data } = await axios.get<any[]>(GAMMA_MARKETS_URL, {
+          params,
+          timeout: 15_000,
+        });
+        const markets = Array.isArray(data) ? data : [];
+        const matched = markets.find((market) => {
+          const candidateConditionId = String(market?.conditionId || market?.condition_id || '').trim();
+          const candidateSlug = String(market?.slug || market?.marketSlug || market?.market_slug || '').trim().toLowerCase();
+          return (
+            (conditionId && candidateConditionId === conditionId) ||
+            (marketSlug && candidateSlug === marketSlug)
+          );
+        });
+        if (!matched) {
+          continue;
+        }
+
+        const matchedConditionId = String(matched?.conditionId || matched?.condition_id || '').trim();
+        const matchedMarketSlug = String(matched?.slug || matched?.marketSlug || matched?.market_slug || '').trim().toLowerCase();
+        const resolvedMap = this.buildOutcomeMapFromMarket(matched, {
+          ...baseMap,
+          conditionId: conditionId || matchedConditionId || baseMap.conditionId || null,
+          marketSlug: marketSlug || matchedMarketSlug || baseMap.marketSlug || null,
+        });
+        this.storeOutcomeMap(
+          resolvedMap,
+          conditionId || matchedConditionId || null,
+          marketSlug || matchedMarketSlug || null
+        );
+        return resolvedMap;
+      } catch (error: any) {
+        console.log(`⚠️  Outcome map resolve failed: ${error?.message || 'Unknown error'}`);
+      }
+    }
+
+    return Object.keys(baseMap).length > 0 ? baseMap : null;
+  }
+
+  private buildOutcomeMapFromMarket(market: any, seedMap: OutcomeTokenMap = {}): OutcomeTokenMap {
+    const outcomeMap: OutcomeTokenMap = {
+      ...seedMap,
+      conditionId: String(market?.conditionId || market?.condition_id || seedMap.conditionId || '').trim() || null,
+      marketSlug: String(market?.slug || market?.marketSlug || market?.market_slug || seedMap.marketSlug || '').trim().toLowerCase() || null,
+      updatedAt: Date.now(),
+    };
+    const tokens = Array.isArray(market?.tokens) ? market.tokens : [];
+    for (const token of tokens) {
+      const tokenId = String(token?.token_id || token?.tokenId || token?.asset_id || token?.id || '').trim();
+      const normalizedOutcome = this.normalizeOutcomeSide(
+        token?.outcome ||
+        token?.label ||
+        token?.name ||
+        token?.shortName ||
+        token?.short_name
+      );
+      if (tokenId && normalizedOutcome) {
+        outcomeMap[normalizedOutcome] = tokenId;
+      }
+    }
+
+    const outcomes = this.parseOutcomeArray(market?.outcomes);
+    if (outcomes.length === tokens.length && outcomes.length > 0) {
+      for (let i = 0; i < tokens.length; i++) {
+        const tokenId = String(tokens[i]?.token_id || tokens[i]?.tokenId || tokens[i]?.asset_id || tokens[i]?.id || '').trim();
+        const normalizedOutcome = this.normalizeOutcomeSide(outcomes[i]);
+        if (tokenId && normalizedOutcome && !outcomeMap[normalizedOutcome]) {
+          outcomeMap[normalizedOutcome] = tokenId;
+        }
+      }
+    }
+
+    const clobTokenIds = this.parseTokenIdArray(market?.clobTokenIds ?? market?.clob_token_ids);
+    if (outcomes.length === clobTokenIds.length && outcomes.length > 0) {
+      for (let i = 0; i < clobTokenIds.length; i++) {
+        const normalizedOutcome = this.normalizeOutcomeSide(outcomes[i]);
+        const tokenId = clobTokenIds[i];
+        if (tokenId && normalizedOutcome && !outcomeMap[normalizedOutcome]) {
+          outcomeMap[normalizedOutcome] = tokenId;
+        }
+      }
+    }
+
+    outcomeMap.complete = Boolean(outcomeMap.UP && outcomeMap.DOWN);
+
+    return outcomeMap;
   }
 
   private findOutcomeLabelInMarket(market: any, tokenId: string): string | undefined {
@@ -493,7 +837,9 @@ export class TradeExecutor {
 
   private parseOutcomeArray(value: any): string[] {
     if (Array.isArray(value)) {
-      return value.map((item) => this.normalizeOutcomeLabel(item)).filter(Boolean) as string[];
+      return value
+        .map((item) => this.normalizeOutcomeLabel(item?.outcome ?? item?.label ?? item?.name ?? item))
+        .filter(Boolean) as string[];
     }
 
     if (typeof value === 'string') {
@@ -513,10 +859,40 @@ export class TradeExecutor {
     return [];
   }
 
+  private parseTokenIdArray(value: any): string[] {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item ?? '').trim()).filter(Boolean);
+    }
+
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => String(item ?? '').trim()).filter(Boolean);
+        }
+      } catch {
+        return value
+          .split(',')
+          .map((item) => String(item ?? '').trim())
+          .filter(Boolean);
+      }
+    }
+
+    return [];
+  }
+
   private normalizeOutcomeLabel(value: any): string | undefined {
     const normalized = String(value ?? '').trim();
     if (!normalized) return undefined;
     return normalized.toUpperCase();
+  }
+
+  private normalizeOutcomeSide(value: any): 'UP' | 'DOWN' | undefined {
+    const normalized = this.normalizeOutcomeLabel(value);
+    if (!normalized) return undefined;
+    if (normalized === 'YES' || normalized === 'UP') return 'UP';
+    if (normalized === 'NO' || normalized === 'DOWN') return 'DOWN';
+    return undefined;
   }
 
   async getTickSize(tokenId: string): Promise<number> {
@@ -1414,25 +1790,39 @@ export class TradeExecutor {
     console.log(`   Copy notional: ${copyNotional} USDC`);
 
     return this.executeWithRetry(async () => {
-      try {
-        return await this.executeSignalTakerOrder(originalTrade, 'FOK', copyNotional);
-      } catch (fokError: any) {
-        console.log(`⚠️  FOK taker failed: ${fokError?.message || 'Unknown error'}`);
+      const orderbook = await this.getOrderbookForExecution(originalTrade.tokenId);
+      const bestBidValue = Number(orderbook?.bids?.[0]?.price);
+      const bestAskValue = Number(orderbook?.asks?.[0]?.price);
+      const bestBid = Number.isFinite(bestBidValue) ? bestBidValue : null;
+      const bestAsk = Number.isFinite(bestAskValue) ? bestAskValue : null;
+      const asksDepth = Array.isArray(orderbook?.asks) ? orderbook.asks.length : 0;
+
+      if (asksDepth === 0) {
+        throw new Error('no_liquidity');
+      }
+      if (bestAsk == null || bestAsk <= 0) {
+        throw new Error('invalid_orderbook');
+      }
+      if (bestBid != null && bestBid < 0.01 && Number(originalTrade.price) > 0.9) {
+        throw new Error('wrong_orderbook_side');
       }
 
-      try {
-        return await this.executeSignalTakerOrder(originalTrade, 'FAK', copyNotional);
-      } catch (fakError: any) {
-        console.log(`⚠️  FAK taker failed: ${fakError?.message || 'Unknown error'}`);
+      const spread = bestBid != null ? bestAsk - bestBid : Number.POSITIVE_INFINITY;
+      const slippage = Number(originalTrade.price) > 0
+        ? (bestAsk - Number(originalTrade.price)) / Number(originalTrade.price)
+        : null;
+
+      if (spread <= 0.002) {
+        if (slippage == null || slippage > 0.001) {
+          throw new Error('slippage_too_high');
+        }
+        return this.executeSignalTakerOrder(originalTrade, copyNotional, bestAsk, bestBid, bestAsk, slippage);
       }
 
-      const orderbook = await this.getOrderbookForExecution(originalTrade.tokenId).catch(() => ({ bids: [], asks: [] }));
-      const makerFallbackResult = await this.tryMakerFallback(originalTrade, copyNotional, orderbook || { bids: [], asks: [] });
-      if (makerFallbackResult) {
-        return makerFallbackResult;
+      if (bestBid == null) {
+        throw new Error('invalid_orderbook');
       }
-
-      throw new Error('signal_execution_exhausted');
+      return this.executeSignalMakerOrder(originalTrade, copyNotional, bestBid, bestAsk, slippage);
     });
   }
 
@@ -1597,26 +1987,31 @@ export class TradeExecutor {
     });
   }
 
-  private async getSignalTakerPrice(originalTrade: Trade): Promise<number> {
-    const sourcePrice = Number(originalTrade.price);
-    const rawPrice = originalTrade.side === 'BUY'
-      ? Math.min(sourcePrice + 0.01, 0.995)
-      : Math.max(sourcePrice - 0.01, 0.005);
-    return this.validatePrice(rawPrice, originalTrade.tokenId);
-  }
-
   private async executeSignalTakerOrder(
     originalTrade: Trade,
-    orderType: 'FOK' | 'FAK',
-    copyNotional: number
+    copyNotional: number,
+    executionPrice: number,
+    bestBid: number | null,
+    bestAsk: number | null,
+    slippage: number | null
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
     const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
-    const validatedPrice = await this.getSignalTakerPrice(originalTrade);
+    const validatedPrice = await this.validatePrice(executionPrice, originalTrade.tokenId);
     const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
-    const orderTypeEnum = orderType === 'FOK' ? OrderType.FOK : OrderType.FAK;
+
+    console.log('[Execution Plan]', {
+      mode: 'TAKER',
+      sourcePrice: originalTrade.price,
+      bestBid,
+      bestAsk,
+      chosenPrice: validatedPrice,
+      slippage,
+      tokenId: originalTrade.tokenId,
+      side: 'BUY',
+    });
 
     console.log('[Signal Taker Attempt]', {
       tokenId: originalTrade.tokenId,
@@ -1624,7 +2019,7 @@ export class TradeExecutor {
       side: originalTrade.side,
       sourcePrice: originalTrade.price,
       executionPrice: validatedPrice,
-      orderType,
+      orderType: 'FAK',
       copyNotional,
     });
 
@@ -1635,18 +2030,18 @@ export class TradeExecutor {
         price: validatedPrice,
         side: originalTrade.side as Side,
         feeRateBps,
-        orderType: orderTypeEnum,
+        orderType: OrderType.FAK,
       },
       orderOpts,
-      orderTypeEnum
+      OrderType.FAK
     );
 
     if (!response.success) {
       const errorMsg = response.errorMsg || response.error || 'Unknown error';
-      throw new Error(`${orderType}_failed:${errorMsg}`);
+      throw new Error(`FAK_failed:${errorMsg}`);
     }
 
-    console.log(`✅ ${orderType} order executed: ${response.orderID}`);
+    console.log(`✅ FAK order executed: ${response.orderID}`);
     return {
       orderId: response.orderID,
       copyNotional,
@@ -1655,6 +2050,95 @@ export class TradeExecutor {
       side: originalTrade.side,
       tokenId: originalTrade.tokenId,
     };
+  }
+
+  private async executeSignalMakerOrder(
+    originalTrade: Trade,
+    copyNotional: number,
+    bestBid: number,
+    bestAsk: number,
+    slippage: number | null
+  ): Promise<CopyExecutionResult> {
+    await this.validateBalance(copyNotional, originalTrade.tokenId);
+
+    const rawMakerPrice = Math.min(
+      Number(originalTrade.price) - 0.001,
+      bestBid + 0.001
+    );
+    const validatedPrice = await this.validatePrice(rawMakerPrice, originalTrade.tokenId);
+    if (validatedPrice <= bestBid) {
+      throw new Error('maker_price_not_improving');
+    }
+
+    const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+    const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
+    const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
+
+    console.log('[Execution Plan]', {
+      mode: 'MAKER',
+      sourcePrice: originalTrade.price,
+      bestBid,
+      bestAsk,
+      chosenPrice: validatedPrice,
+      slippage,
+      tokenId: originalTrade.tokenId,
+      side: 'BUY',
+    });
+
+    const response = await this.clobClient.createAndPostOrder(
+      {
+        tokenID: originalTrade.tokenId,
+        price: validatedPrice,
+        size: copyShares,
+        side: originalTrade.side as Side,
+        feeRateBps,
+      },
+      orderOpts,
+      OrderType.GTC,
+      false,
+      true
+    );
+
+    if (!response.success) {
+      const errorMsg = response.errorMsg || response.error || 'Unknown error';
+      throw new Error(`maker_submit_failed:${errorMsg}`);
+    }
+
+    const orderId = response.orderID;
+    const deadline = Date.now() + 3000;
+    let lastMatched = 0;
+    let resolvedPrice = validatedPrice;
+
+    while (Date.now() < deadline) {
+      await this.sleep(Math.min(1000, Math.max(100, deadline - Date.now())));
+      try {
+        const order = await this.clobClient.getOrder(orderId);
+        const matched = parseFloat(order?.size_matched || '0');
+        const price = parseFloat(order?.price || validatedPrice.toString());
+        lastMatched = Number.isFinite(matched) ? matched : lastMatched;
+        resolvedPrice = Number.isFinite(price) ? price : resolvedPrice;
+        if (lastMatched > 0) {
+          return {
+            orderId,
+            copyNotional: lastMatched * resolvedPrice,
+            copyShares: lastMatched,
+            price: resolvedPrice,
+            side: originalTrade.side,
+            tokenId: originalTrade.tokenId,
+          };
+        }
+      } catch (error: any) {
+        console.log(`   Maker execution poll failed: ${error?.message || 'Unknown error'}`);
+      }
+    }
+
+    try {
+      await this.clobClient.cancelOrder({ orderID: orderId });
+    } catch (error: any) {
+      console.log(`   Maker execution cancel failed: ${error?.message || 'Unknown error'}`);
+    }
+
+    throw new Error('maker_timeout_cancelled');
   }
 
   async executeSignalMakerEntry(

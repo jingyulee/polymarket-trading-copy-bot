@@ -90,6 +90,14 @@ export interface PerformanceStats {
   total_entry_notional: number;
 }
 
+export interface OutcomeMapCacheEntry {
+  conditionId?: string | null;
+  marketSlug?: string | null;
+  upTokenId?: string | null;
+  downTokenId?: string | null;
+  updatedTs: number;
+}
+
 const sessionStartedAt = Date.now();
 const configuredDbPath = (process.env.DB_PATH || './data/trade-log.sqlite').trim();
 const resolvedDbPath = path.resolve(process.cwd(), configuredDbPath);
@@ -135,6 +143,18 @@ db.exec(`
     lock_key TEXT PRIMARY KEY,
     ts INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS outcome_map_cache (
+    condition_id TEXT,
+    market_slug TEXT,
+    up_token_id TEXT,
+    down_token_id TEXT,
+    updated_ts INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (condition_id, market_slug)
   )
 `);
 
@@ -266,6 +286,27 @@ const deleteMarketLockStmt = db.prepare(`
   DELETE FROM market_lock WHERE lock_key = ?
 `);
 
+const upsertOutcomeMapCacheStmt = db.prepare(`
+  INSERT INTO outcome_map_cache (
+    condition_id, market_slug, up_token_id, down_token_id, updated_ts
+  ) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(condition_id, market_slug) DO UPDATE SET
+    up_token_id = COALESCE(excluded.up_token_id, outcome_map_cache.up_token_id),
+    down_token_id = COALESCE(excluded.down_token_id, outcome_map_cache.down_token_id),
+    updated_ts = excluded.updated_ts
+`);
+
+const findOutcomeMapCacheStmt = db.prepare(`
+  SELECT condition_id, market_slug, up_token_id, down_token_id, updated_ts
+  FROM outcome_map_cache
+  WHERE
+    (? IS NOT NULL AND condition_id = ?)
+    OR
+    (? IS NOT NULL AND market_slug = ?)
+  ORDER BY updated_ts DESC
+  LIMIT 1
+`);
+
 function createInsertPositionStatement(tableName: 'positions_sim' | 'positions_live') {
   return db.prepare(`
     INSERT INTO ${tableName} (
@@ -392,6 +433,50 @@ export function persistMarketLock(lockKey: string, ts: number = Date.now()): voi
 
 export function removeMarketLock(lockKey: string): void {
   deleteMarketLockStmt.run(lockKey);
+}
+
+export function upsertOutcomeMapCache(entry: OutcomeMapCacheEntry): void {
+  upsertOutcomeMapCacheStmt.run(
+    entry.conditionId ?? null,
+    entry.marketSlug ?? null,
+    entry.upTokenId ?? null,
+    entry.downTokenId ?? null,
+    entry.updatedTs
+  );
+}
+
+export function findOutcomeMapCache(
+  conditionId?: string | null,
+  marketSlug?: string | null
+): OutcomeMapCacheEntry | null {
+  const normalizedConditionId = conditionId?.trim() || null;
+  const normalizedMarketSlug = marketSlug?.trim().toLowerCase() || null;
+  const row = findOutcomeMapCacheStmt.get(
+    normalizedConditionId,
+    normalizedConditionId,
+    normalizedMarketSlug,
+    normalizedMarketSlug
+  ) as
+    | {
+      condition_id: string | null;
+      market_slug: string | null;
+      up_token_id: string | null;
+      down_token_id: string | null;
+      updated_ts: number;
+    }
+    | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    conditionId: row.condition_id,
+    marketSlug: row.market_slug,
+    upTokenId: row.up_token_id,
+    downTokenId: row.down_token_id,
+    updatedTs: row.updated_ts,
+  };
 }
 
 export function loadRecentProcessedTradeKeys(windowMs: number = 7 * 24 * 60 * 60 * 1000): string[] {

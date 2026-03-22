@@ -15,6 +15,10 @@ const NO_LOCK_REASONS = new Set([
   'source_trade_usd_too_small',
   'non_crypto_market',
   'stale_trade',
+  'stale',
+  'too_small',
+  'market_outcome_map_missing',
+  'signal_pending',
 ]);
 
 const STRATEGY_FILTER_SKIP_REASONS = new Set([
@@ -22,6 +26,10 @@ const STRATEGY_FILTER_SKIP_REASONS = new Set([
   'source_trade_usd_too_small',
   'non_crypto_market',
   'stale_trade',
+  'stale',
+  'too_small',
+  'market_outcome_map_missing',
+  'signal_pending',
 ]);
 
 export function getMarketLockBehavior(

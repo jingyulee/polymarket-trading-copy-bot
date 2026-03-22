@@ -74,10 +74,11 @@ export const config = {
     signalWindowMs: parseNumber(process.env.SIGNAL_WINDOW_MS, 8000),
     signalMinTradeCount: parseNumber(process.env.SIGNAL_MIN_TRADE_COUNT, 2),
     signalMinCumulativeUsd: parseNumber(process.env.SIGNAL_MIN_CUMULATIVE_USD, 20),
+    singleSignalTriggerUsd: parseNumber(process.env.SINGLE_SIGNAL_TRIGGER_USD, 20),
     signalRequireBuyOnly: parseBoolean(process.env.SIGNAL_REQUIRE_BUY_ONLY, true),
     minSourcePrice: parseNumber(process.env.MIN_SOURCE_PRICE, 0.97),
     maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
-    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 35000),
+    maxSourceTradeAgeMs: parseNumber(process.env.MAX_SOURCE_TRADE_AGE_MS, 30000),
     minSourceTradeUsd: parseNumber(process.env.MIN_SOURCE_TRADE_USD, 2),
     maxUsdPerOrder: parseNumber(process.env.MAX_USD_PER_ORDER, 3),
     marketScope: process.env.MARKET_SCOPE || 'crypto-only',
@@ -172,7 +173,8 @@ export function validateConfig(): void {
   console.log(
     `   Signal trigger: ${config.trading.enableSignalTrigger ? 'enabled' : 'disabled'} ` +
     `(signalWindowMs=${config.trading.signalWindowMs}, signalMinTradeCount=${config.trading.signalMinTradeCount}, ` +
-    `signalMinCumulativeUsd=${config.trading.signalMinCumulativeUsd}, requireBuyOnly=${config.trading.signalRequireBuyOnly})`
+    `signalMinCumulativeUsd=${config.trading.signalMinCumulativeUsd}, singleSignalTriggerUsd=${config.trading.singleSignalTriggerUsd}, ` +
+    `requireBuyOnly=${config.trading.signalRequireBuyOnly})`
   );
   console.log(
     `   No-asks fallback: ${config.trading.enableNoAsksFallback ? 'enabled' : 'disabled'} ` +

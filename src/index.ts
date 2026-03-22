@@ -34,6 +34,7 @@ interface SignalConfirmationContext {
   cumulativeSourceUsd: number;
   tradeCount: number;
   windowMs: number;
+  fastTrigger?: boolean;
 }
 
 interface SignalMakerEntryDecision {
@@ -102,6 +103,7 @@ class PolymarketCopyBot {
     console.log(`signalWindowMs: ${config.trading.signalWindowMs}`);
     console.log(`signalMinTradeCount: ${config.trading.signalMinTradeCount}`);
     console.log(`signalMinCumulativeUsd: ${config.trading.signalMinCumulativeUsd}`);
+    console.log(`singleSignalTriggerUsd: ${config.trading.singleSignalTriggerUsd}`);
     console.log(`No-asks fallback: ${config.trading.enableNoAsksFallback ? 'Enabled' : 'Disabled'} (${config.trading.noAsksFallbackOrderType})`);
     if (config.risk.maxSessionNotional > 0 || config.risk.maxPerMarketNotional > 0) {
       console.log(`Risk caps: session=${config.risk.maxSessionNotional || '∞'} USDC, per-market=${config.risk.maxPerMarketNotional || '∞'} USDC`);
@@ -357,6 +359,48 @@ class PolymarketCopyBot {
       cumulativeSourceUsd: signal.cumulativeSourceUsd,
       tradeCount: signal.tradeCount,
       windowMs,
+    };
+  }
+
+  private getFastSignalConfirmation(params: {
+    trade: Trade;
+    signal: SignalEntry;
+    now: number;
+    sourceAgeMs: number;
+    sourcePrice: number;
+    sourceSizeUsd: number;
+  }): SignalConfirmationContext | null {
+    const { trade, signal, now, sourceAgeMs, sourcePrice, sourceSizeUsd } = params;
+    if (!config.trading.enableSignalTrigger) {
+      return null;
+    }
+    if (String(trade.side || '').toUpperCase() !== 'BUY') {
+      return null;
+    }
+    if (sourcePrice < config.trading.minSourcePrice) {
+      return null;
+    }
+    if (sourceSizeUsd < config.trading.singleSignalTriggerUsd) {
+      return null;
+    }
+    if (sourceAgeMs > config.trading.maxSourceTradeAgeMs) {
+      return null;
+    }
+
+    const effectiveSignalPrice = this.getEffectiveSignalPrice(signal);
+    if (effectiveSignalPrice == null) {
+      return null;
+    }
+
+    return {
+      ageMs: Math.max(0, now - signal.lastTs),
+      firstPrice: signal.firstSourcePrice,
+      latestPrice: signal.latestSourcePrice,
+      effectiveSignalPrice,
+      cumulativeSourceUsd: signal.cumulativeSourceUsd,
+      tradeCount: signal.tradeCount,
+      windowMs: Math.max(0, now - signal.firstTs),
+      fastTrigger: true,
     };
   }
 
@@ -754,7 +798,14 @@ class PolymarketCopyBot {
         ageMs: Math.max(0, now - activeSignal.firstTs),
       });
 
-      signalConfirmation = this.getSignalConfirmation(activeSignal, now);
+      signalConfirmation = this.getFastSignalConfirmation({
+        trade,
+        signal: activeSignal,
+        now,
+        sourceAgeMs,
+        sourcePrice,
+        sourceSizeUsd,
+      }) || this.getSignalConfirmation(activeSignal, now);
       if (signalConfirmation) {
         effectiveTrade = {
           ...trade,
@@ -766,6 +817,14 @@ class PolymarketCopyBot {
           price: signalConfirmation.effectiveSignalPrice,
           size: Math.max(trade.size, signalConfirmation.cumulativeSourceUsd),
         };
+        if (signalConfirmation.fastTrigger) {
+          console.log('[Signal Fast Trigger]', {
+            market: effectiveTrade.market,
+            sourcePrice,
+            sourceSizeUsd,
+            threshold: config.trading.singleSignalTriggerUsd,
+          });
+        }
         console.log('[Signal Confirmed]', {
           key: signalKey,
           market: effectiveTrade.market,
@@ -776,6 +835,7 @@ class PolymarketCopyBot {
           latestPrice: signalConfirmation.latestPrice,
           effectiveSignalPrice: signalConfirmation.effectiveSignalPrice,
           windowMs: signalConfirmation.windowMs,
+          fastTrigger: Boolean(signalConfirmation.fastTrigger),
         });
       }
     }
@@ -787,6 +847,46 @@ class PolymarketCopyBot {
         side: trade.side,
         tradeCount: activeSignal?.tradeCount ?? 0,
         cumulativeSourceUsd: activeSignal?.cumulativeSourceUsd ?? 0,
+      });
+      this.printStats();
+      return;
+    }
+
+    this.executor.seedOutcomeMapFromTrade(effectiveTrade);
+
+    const executionSourcePrice = signalConfirmation?.effectiveSignalPrice ?? sourcePrice;
+    if (executionSourcePrice < 0.97) {
+      this.handleTradeSkip(trade, {
+        reason: 'low_confidence',
+        sourceAgeMs,
+        marketLockKey: getMarketLockKey(effectiveTrade),
+      });
+      this.printStats();
+      return;
+    }
+    if (sourceSizeUsd > 1000) {
+      this.handleTradeSkip(trade, {
+        reason: 'whale_trade',
+        sourceAgeMs,
+        marketLockKey: getMarketLockKey(effectiveTrade),
+      });
+      this.printStats();
+      return;
+    }
+    if (sourceSizeUsd < 2) {
+      this.handleTradeSkip(trade, {
+        reason: 'too_small',
+        sourceAgeMs,
+        marketLockKey: getMarketLockKey(effectiveTrade),
+      });
+      this.printStats();
+      return;
+    }
+    if (sourceAgeMs > config.trading.maxSourceTradeAgeMs) {
+      this.handleTradeSkip(trade, {
+        reason: 'stale',
+        sourceAgeMs,
+        marketLockKey: getMarketLockKey(effectiveTrade),
       });
       this.printStats();
       return;
