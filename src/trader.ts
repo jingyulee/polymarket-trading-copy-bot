@@ -426,28 +426,13 @@ export class TradeExecutor {
     console.log('[Execution Side Locked]', {
       market: originalTrade.market,
       sourceSide: sourceOutcomeSide,
+      executionSide: sourceOutcomeSide,
       sourceTokenId: normalizedOriginalTokenId || null,
-      expectedTokenId,
+      executionTokenId: expectedTokenId,
       outcomeMapUpTokenId: upTokenId,
       outcomeMapDownTokenId: downTokenId,
+      mustMatch: true,
     });
-
-    if (normalizedOriginalTokenId && normalizedOriginalTokenId !== expectedTokenId) {
-      console.log('[Execution Validation]', {
-        market: originalTrade.market,
-        sourceSide: sourceOutcomeSide,
-        expectedTokenId,
-        bestAsk: null,
-        bestBid: null,
-        skipReason: 'source_execution_side_mismatch',
-      });
-      return {
-        ...fallbackResult,
-        chosenTokenId: expectedTokenId,
-        outcomeSide: sourceOutcomeSide,
-        reason: 'source_execution_side_mismatch',
-      };
-    }
 
     const expectedLookup = await this.getOrderbookLookup(expectedTokenId, originalTrade.market);
     const validationChosenTokenId = expectedTokenId;
@@ -472,8 +457,6 @@ export class TradeExecutor {
       chosenTokenId: validationChosenTokenId,
       chosenBestBid: validationBestBid,
       chosenBestAsk: validationBestAsk,
-      oppositeBestBid: null,
-      oppositeBestAsk: null,
       directAskMatches: validationPassed,
       validationPassed,
       validationReason: validationPassed ? 'source_side_ask_match' : 'source_side_locked',
