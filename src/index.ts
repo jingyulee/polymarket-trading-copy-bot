@@ -918,15 +918,6 @@ class PolymarketCopyBot {
     this.executor.seedOutcomeMapFromTrade(effectiveTrade);
 
     const executionSourcePrice = signalConfirmation?.effectiveSignalPrice ?? sourcePrice;
-    if (executionSourcePrice < 0.97) {
-      this.handleTradeSkip(trade, {
-        reason: 'low_confidence',
-        sourceAgeMs,
-        marketLockKey: getMarketLockKey(effectiveTrade),
-      });
-      this.printStats();
-      return;
-    }
     if (sourceSizeUsd > 1000) {
       this.handleTradeSkip(trade, {
         reason: 'whale_trade',
