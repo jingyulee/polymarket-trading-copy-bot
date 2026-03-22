@@ -1549,6 +1549,52 @@ export class TradeExecutor {
     return Math.round(price / tickSize) * tickSize;
   }
 
+  private getTickDecimals(tickSize: number): number {
+    const tickString = tickSize.toString().toLowerCase();
+    if (tickString.includes('e-')) {
+      const exponent = Number(tickString.split('e-')[1]);
+      return Number.isFinite(exponent) ? exponent : 6;
+    }
+    const [, decimals = ''] = tickString.split('.');
+    return decimals.length;
+  }
+
+  private normalizePriceDownToTick(price: number, tickSize: number): number {
+    const decimals = this.getTickDecimals(tickSize);
+    const flooredTicks = Math.floor((price + 1e-12) / tickSize);
+    const flooredPrice = flooredTicks * tickSize;
+    const minPrice = tickSize;
+    const maxPrice = Math.max(tickSize, 1 - tickSize);
+    const normalizedPrice = Math.max(minPrice, Math.min(maxPrice, flooredPrice));
+    return Number(normalizedPrice.toFixed(decimals));
+  }
+
+  private async buildSignalExecutionPricePlan(tokenId: string, sourcePrice: number): Promise<{
+    pricingMode: 'source_trade_price' | 'fixed_signal_price_fallback';
+    rawSourcePrice: number;
+    normalizedExecutionPrice: number;
+    tickSize: number;
+    roundingApplied: boolean;
+  }> {
+    const metadata = await this.getMarketMetadata(tokenId);
+    const tickSize = metadata.tickSize;
+    const pricingMode = Number.isFinite(sourcePrice) && sourcePrice > 0
+      ? 'source_trade_price'
+      : 'fixed_signal_price_fallback';
+    const basePrice = pricingMode === 'source_trade_price'
+      ? sourcePrice
+      : config.trading.executionFixedPrice;
+    const normalizedExecutionPrice = this.normalizePriceDownToTick(basePrice, tickSize);
+
+    return {
+      pricingMode,
+      rawSourcePrice: sourcePrice,
+      normalizedExecutionPrice,
+      tickSize,
+      roundingApplied: Math.abs(normalizedExecutionPrice - basePrice) > 1e-12,
+    };
+  }
+
   async getValidatedPriceForDecision(price: number, tokenId: string): Promise<number> {
     return this.validatePrice(price, tokenId);
   }
@@ -1874,14 +1920,15 @@ export class TradeExecutor {
   ): Promise<CopyExecutionResult> {
     const initialCopyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
     const configuredOrderType = this.getConfiguredExecutionOrderType();
-    const fixedExecutionPrice = await this.validatePrice(config.trading.executionFixedPrice, originalTrade.tokenId);
+    const pricePlan = await this.buildSignalExecutionPricePlan(originalTrade.tokenId, Number(originalTrade.price));
+    const executionPrice = pricePlan.normalizedExecutionPrice;
     let adjustedCopyNotional = initialCopyNotional;
-    let adjustedCopyShares = this.calculateSharesFromNotional(adjustedCopyNotional, fixedExecutionPrice);
+    let adjustedCopyShares = this.calculateSharesFromNotional(adjustedCopyNotional, executionPrice);
     const minSizeAdjusted = adjustedCopyShares < MIN_SHARES;
 
     if (minSizeAdjusted) {
       adjustedCopyShares = MIN_SHARES;
-      adjustedCopyNotional = Math.round(adjustedCopyShares * fixedExecutionPrice * 100) / 100;
+      adjustedCopyNotional = Math.round(adjustedCopyShares * executionPrice * 100) / 100;
     }
 
     console.log(`📈 Executing signal-triggered trade:`);
@@ -1891,15 +1938,17 @@ export class TradeExecutor {
     console.log(`   Token ID: ${originalTrade.tokenId}`);
     console.log(`   Copy notional: ${initialCopyNotional} USDC`);
     console.log('[Execution Plan]', {
-      pricingMode: 'fixed_signal_price',
+      pricingMode: pricePlan.pricingMode,
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
       sourceTokenId: originalTrade.tokenId,
       executionTokenId: originalTrade.tokenId,
-      sourcePrice: originalTrade.price,
-      fixedExecutionPrice,
+      rawSourcePrice: pricePlan.rawSourcePrice,
+      normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+      tickSize: pricePlan.tickSize,
+      roundingApplied: pricePlan.roundingApplied,
       latestBestAsk: null,
-      chosenPrice: fixedExecutionPrice,
+      chosenPrice: executionPrice,
       priceDriftBps: 0,
       copyNotional: initialCopyNotional,
       derivedShares: adjustedCopyShares,
@@ -1911,10 +1960,11 @@ export class TradeExecutor {
     return this.executeDirectSourceOrder(
       originalTrade,
       adjustedCopyNotional,
-      fixedExecutionPrice,
+      executionPrice,
       adjustedCopyShares,
       configuredOrderType,
-      minSizeAdjusted
+      minSizeAdjusted,
+      pricePlan
     );
   }
 
@@ -2174,6 +2224,13 @@ export class TradeExecutor {
     copyShares: number,
     configuredOrderType: 'LIMIT' | 'FOK' | 'FAK',
     minSizeAdjusted: boolean,
+    pricePlan: {
+      pricingMode: 'source_trade_price' | 'fixed_signal_price_fallback';
+      rawSourcePrice: number;
+      normalizedExecutionPrice: number;
+      tickSize: number;
+      roundingApplied: boolean;
+    },
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
@@ -2181,12 +2238,14 @@ export class TradeExecutor {
     const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
     console.log('[Order Params Build]', {
       market: originalTrade.market,
-      pricingMode: 'fixed_signal_price',
+      pricingMode: pricePlan.pricingMode,
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
       executionTokenId: originalTrade.tokenId,
-      sourcePrice: originalTrade.price,
-      fixedExecutionPrice: executionPrice,
+      rawSourcePrice: pricePlan.rawSourcePrice,
+      normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+      tickSize: pricePlan.tickSize,
+      roundingApplied: pricePlan.roundingApplied,
       chosenBestAsk: null,
       copyNotional,
       derivedPrice: executionPrice,
@@ -2199,14 +2258,16 @@ export class TradeExecutor {
 
     console.log('[Execution Attempt]', {
       attempt: 1,
-      pricingMode: 'fixed_signal_price',
+      pricingMode: pricePlan.pricingMode,
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
       orderType: configuredOrderType,
       tokenId: originalTrade.tokenId,
       market: originalTrade.market,
-      sourcePrice: originalTrade.price,
-      fixedExecutionPrice: executionPrice,
+      rawSourcePrice: pricePlan.rawSourcePrice,
+      normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+      tickSize: pricePlan.tickSize,
+      roundingApplied: pricePlan.roundingApplied,
       executionPrice: executionPrice,
       copyNotional,
       adjustedNotional: copyNotional,
@@ -2238,9 +2299,11 @@ export class TradeExecutor {
       tokenId: originalTrade.tokenId,
       sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
-      sourcePrice: originalTrade.price,
-      fixedExecutionPrice: executionPrice,
-      pricingMode: 'fixed_signal_price',
+      rawSourcePrice: pricePlan.rawSourcePrice,
+      normalizedExecutionPrice: pricePlan.normalizedExecutionPrice,
+      tickSize: pricePlan.tickSize,
+      roundingApplied: pricePlan.roundingApplied,
+      pricingMode: pricePlan.pricingMode,
       side: originalTrade.outcome,
       price: executionPrice,
       shares: copyShares,
