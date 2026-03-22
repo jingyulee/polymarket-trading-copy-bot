@@ -1872,6 +1872,7 @@ export class TradeExecutor {
   ): Promise<CopyExecutionResult> {
     const copyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
     const configuredOrderType = this.getConfiguredExecutionOrderType();
+    const fixedExecutionPrice = await this.validatePrice(config.trading.executionFixedPrice, originalTrade.tokenId);
 
     console.log(`📈 Executing signal-triggered trade:`);
     console.log(`   Market: ${originalTrade.market}`);
@@ -1879,15 +1880,17 @@ export class TradeExecutor {
     console.log(`   Original size: ${originalTrade.size} USDC`);
     console.log(`   Token ID: ${originalTrade.tokenId}`);
     console.log(`   Copy notional: ${copyNotional} USDC`);
-    const validatedPrice = await this.validatePrice(Number(originalTrade.price), originalTrade.tokenId);
-    const copyShares = this.calculateSharesFromNotional(copyNotional, validatedPrice);
+    const copyShares = this.calculateSharesFromNotional(copyNotional, fixedExecutionPrice);
     console.log('[Execution Plan]', {
+      pricingMode: 'fixed_signal_price',
       sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
       sourceTokenId: originalTrade.tokenId,
       executionTokenId: originalTrade.tokenId,
       sourcePrice: originalTrade.price,
+      fixedExecutionPrice,
       latestBestAsk: null,
-      chosenPrice: validatedPrice,
+      chosenPrice: fixedExecutionPrice,
       priceDriftBps: 0,
       copyNotional,
       derivedShares: copyShares,
@@ -1896,7 +1899,7 @@ export class TradeExecutor {
     return this.executeDirectSourceOrder(
       originalTrade,
       copyNotional,
-      validatedPrice,
+      fixedExecutionPrice,
       copyShares,
       configuredOrderType
     );
@@ -2164,9 +2167,12 @@ export class TradeExecutor {
     const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
     console.log('[Order Params Build]', {
       market: originalTrade.market,
+      pricingMode: 'fixed_signal_price',
+      sourceSide: originalTrade.outcome,
       executionSide: originalTrade.outcome,
       executionTokenId: originalTrade.tokenId,
       sourcePrice: originalTrade.price,
+      fixedExecutionPrice: executionPrice,
       chosenBestAsk: null,
       copyNotional,
       derivedPrice: executionPrice,
@@ -2176,10 +2182,14 @@ export class TradeExecutor {
 
     console.log('[Execution Attempt]', {
       attempt: 1,
+      pricingMode: 'fixed_signal_price',
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
       orderType: configuredOrderType,
       tokenId: originalTrade.tokenId,
       market: originalTrade.market,
       sourcePrice: originalTrade.price,
+      fixedExecutionPrice: executionPrice,
       executionPrice: executionPrice,
       copyNotional,
     });
@@ -2206,6 +2216,11 @@ export class TradeExecutor {
 
     console.log('[Execution Success]', {
       tokenId: originalTrade.tokenId,
+      sourceSide: originalTrade.outcome,
+      executionSide: originalTrade.outcome,
+      sourcePrice: originalTrade.price,
+      fixedExecutionPrice: executionPrice,
+      pricingMode: 'fixed_signal_price',
       side: originalTrade.outcome,
       price: executionPrice,
       shares: copyShares,

@@ -76,6 +76,7 @@ export const config = {
     signalMinCumulativeUsd: parseNumber(process.env.SIGNAL_MIN_CUMULATIVE_USD, 20),
     singleSignalTriggerUsd: parseNumber(process.env.SINGLE_SIGNAL_TRIGGER_USD, 20),
     signalRequireBuyOnly: parseBoolean(process.env.SIGNAL_REQUIRE_BUY_ONLY, true),
+    executionFixedPrice: parseNumber(process.env.EXECUTION_FIXED_PRICE, 0.99),
     mvpMaxPriceDriftBps: parseNumber(process.env.MVP_MAX_PRICE_DRIFT_BPS, 20),
     minSourcePrice: parseNumber(process.env.MIN_SOURCE_PRICE, 0.97),
     maxSourcePrice: parseNumber(process.env.MAX_SOURCE_PRICE, 0.999),
@@ -177,6 +178,7 @@ export function validateConfig(): void {
     `signalMinCumulativeUsd=${config.trading.signalMinCumulativeUsd}, singleSignalTriggerUsd=${config.trading.singleSignalTriggerUsd}, ` +
     `requireBuyOnly=${config.trading.signalRequireBuyOnly})`
   );
+  console.log(`   Fixed execution price: ${config.trading.executionFixedPrice}`);
   console.log(`   MVP max price drift: ${config.trading.mvpMaxPriceDriftBps}bps`);
   console.log(
     `   No-asks fallback: ${config.trading.enableNoAsksFallback ? 'enabled' : 'disabled'} ` +
