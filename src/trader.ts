@@ -137,6 +137,25 @@ export interface SignalMakerExecutionResult extends CopyExecutionResult {
 
 const MIN_SHARES = 5;
 
+interface ActiveOpenOrder {
+  key: string;
+  orderId: string;
+  tokenId: string;
+  market: string;
+  marketSlug?: string;
+  conditionId?: string;
+  sourceSide: string;
+  executionSide: string;
+  placedAt: number;
+  ttlMs: number;
+  shares: number;
+  notional: number;
+  sourcePrice: number;
+  executionPrice: number;
+  status: 'open';
+  timeoutHandle: ReturnType<typeof setTimeout>;
+}
+
 export class TradeExecutor {
   private wallet: ethers.Wallet;
   private provider: ethers.providers.JsonRpcProvider;
@@ -147,6 +166,7 @@ export class TradeExecutor {
   private outcomeMapByConditionId = new Map<string, OutcomeTokenMap>();
   private outcomeMapByMarketSlug = new Map<string, OutcomeTokenMap>();
   private activeMarketsCache?: ActiveMarketsCacheEntry;
+  private activeOpenOrders = new Map<string, ActiveOpenOrder>();
   private warnedMissingOutcomeMappings = new Set<string>();
   private readonly CACHE_TTL = 3600000;
   private readonly ACTIVE_MARKETS_CACHE_TTL = 60_000;
@@ -1920,6 +1940,24 @@ export class TradeExecutor {
   ): Promise<CopyExecutionResult> {
     const initialCopyNotional = copyNotionalOverride ?? this.calculateCopySize(originalTrade.size);
     const configuredOrderType = this.getConfiguredExecutionOrderType();
+    const openOrderKey = this.getOpenOrderKey(originalTrade);
+    const existingOpenOrder = configuredOrderType === 'LIMIT'
+      ? this.activeOpenOrders.get(openOrderKey)
+      : undefined;
+
+    if (existingOpenOrder) {
+      console.log('[Open Order Skip]', {
+        reason: 'market_order_already_open',
+        market: existingOpenOrder.market,
+        sourceSide: existingOpenOrder.sourceSide,
+        executionSide: existingOpenOrder.executionSide,
+        tokenId: existingOpenOrder.tokenId,
+        existingOrderId: existingOpenOrder.orderId,
+        placedAt: existingOpenOrder.placedAt,
+      });
+      throw new Error('SKIP:market_order_already_open');
+    }
+
     const pricePlan = await this.buildSignalExecutionPricePlan(originalTrade.tokenId, Number(originalTrade.price));
     const executionPrice = pricePlan.normalizedExecutionPrice;
     let adjustedCopyNotional = initialCopyNotional;
@@ -2112,6 +2150,164 @@ export class TradeExecutor {
     return config.trading.orderType;
   }
 
+  private getOpenOrderKey(trade: Trade): string {
+    const marketKey = trade.conditionId || trade.marketSlug || trade.tokenId;
+    const sideKey = String(trade.outcome || trade.outcomeName || '').trim().toUpperCase() || 'UNKNOWN';
+    return `${marketKey}|${sideKey}`;
+  }
+
+  private isTerminalFilledStatus(status: string): boolean {
+    return ['FILLED', 'MATCHED', 'COMPLETED'].includes(status);
+  }
+
+  private isClosedOrderError(error: any): boolean {
+    const errorMsg = String(error?.message || '').toLowerCase();
+    const responseError = String(error?.response?.data?.error || '').toLowerCase();
+    return (
+      errorMsg.includes('not found') ||
+      errorMsg.includes('closed') ||
+      errorMsg.includes('filled') ||
+      responseError.includes('not found') ||
+      responseError.includes('closed') ||
+      responseError.includes('filled')
+    );
+  }
+
+  private getMatchedOrderSize(order: any): number {
+    const matched = parseFloat(order?.size_matched || '0');
+    return Number.isFinite(matched) ? matched : 0;
+  }
+
+  private getOriginalOrderSize(order: any, fallbackSize: number): number {
+    const originalSize = parseFloat(order?.original_size || order?.size || `${fallbackSize}`);
+    return Number.isFinite(originalSize) ? originalSize : fallbackSize;
+  }
+
+  private clearActiveOpenOrder(key: string): void {
+    const existing = this.activeOpenOrders.get(key);
+    if (!existing) return;
+    clearTimeout(existing.timeoutHandle);
+    this.activeOpenOrders.delete(key);
+  }
+
+  private async handleOpenOrderTtlExpiry(key: string, orderId: string): Promise<void> {
+    const activeOrder = this.activeOpenOrders.get(key);
+    if (!activeOrder || activeOrder.orderId !== orderId) {
+      return;
+    }
+
+    console.log('[Open Order TTL Expired]', {
+      market: activeOrder.market,
+      orderId: activeOrder.orderId,
+      tokenId: activeOrder.tokenId,
+      sourceSide: activeOrder.sourceSide,
+      executionSide: activeOrder.executionSide,
+      ttlMs: activeOrder.ttlMs,
+    });
+
+    let matchedSize = 0;
+    let originalSize = activeOrder.shares;
+
+    try {
+      const order = await this.clobClient.getOrder(activeOrder.orderId);
+      matchedSize = this.getMatchedOrderSize(order);
+      originalSize = this.getOriginalOrderSize(order, activeOrder.shares);
+      const status = String(order?.status || '').toUpperCase();
+
+      if (this.isTerminalFilledStatus(status) || matchedSize >= originalSize - 0.0001) {
+        this.clearActiveOpenOrder(key);
+        console.log('[Open Order Already Filled]', {
+          market: activeOrder.market,
+          orderId: activeOrder.orderId,
+          tokenId: activeOrder.tokenId,
+        });
+        return;
+      }
+    } catch (error: any) {
+      if (this.isClosedOrderError(error)) {
+        this.clearActiveOpenOrder(key);
+        console.log('[Open Order Already Filled]', {
+          market: activeOrder.market,
+          orderId: activeOrder.orderId,
+          tokenId: activeOrder.tokenId,
+        });
+        return;
+      }
+      console.log(`   Open order status poll failed: ${error?.message || 'Unknown error'}`);
+    }
+
+    try {
+      await this.clobClient.cancelOrder({ orderID: activeOrder.orderId });
+      this.clearActiveOpenOrder(key);
+      console.log('[Open Order Cancelled]', {
+        market: activeOrder.market,
+        orderId: activeOrder.orderId,
+        tokenId: activeOrder.tokenId,
+        finalStatus: matchedSize > 0 ? 'partially_filled_then_cancelled' : 'expired_cancelled',
+      });
+    } catch (error: any) {
+      if (this.isClosedOrderError(error)) {
+        this.clearActiveOpenOrder(key);
+        console.log('[Open Order Already Filled]', {
+          market: activeOrder.market,
+          orderId: activeOrder.orderId,
+          tokenId: activeOrder.tokenId,
+        });
+        return;
+      }
+      console.log(`   Open order cancel failed: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  private registerActiveOpenOrder(params: {
+    key: string;
+    trade: Trade;
+    orderId: string;
+    executionPrice: number;
+    shares: number;
+    notional: number;
+  }): void {
+    const { key, trade, orderId, executionPrice, shares, notional } = params;
+    this.clearActiveOpenOrder(key);
+
+    const timeoutHandle = setTimeout(() => {
+      void this.handleOpenOrderTtlExpiry(key, orderId);
+    }, config.trading.orderTtlMs);
+
+    const normalizedSide = String(trade.outcome || trade.outcomeName || '').trim().toUpperCase() || 'UNKNOWN';
+    const entry: ActiveOpenOrder = {
+      key,
+      orderId,
+      tokenId: trade.tokenId,
+      market: trade.market,
+      marketSlug: trade.marketSlug,
+      conditionId: trade.conditionId,
+      sourceSide: normalizedSide,
+      executionSide: normalizedSide,
+      placedAt: Date.now(),
+      ttlMs: config.trading.orderTtlMs,
+      shares,
+      notional,
+      sourcePrice: Number(trade.price),
+      executionPrice,
+      status: 'open',
+      timeoutHandle,
+    };
+
+    this.activeOpenOrders.set(key, entry);
+    console.log('[Open Order Registered]', {
+      market: entry.market,
+      sourceSide: entry.sourceSide,
+      executionSide: entry.executionSide,
+      tokenId: entry.tokenId,
+      orderId: entry.orderId,
+      ttlMs: entry.ttlMs,
+      executionPrice: entry.executionPrice,
+      shares: entry.shares,
+      notional: entry.notional,
+    });
+  }
+
   private async submitDirectSourceOrder(params: {
     trade: Trade;
     executionPrice: number;
@@ -2293,6 +2489,20 @@ export class TradeExecutor {
         reason: errorMsg,
       });
       throw new Error(`${configuredOrderType}_failed:${errorMsg}`);
+    }
+
+    if (configuredOrderType === 'LIMIT') {
+      const responseStatus = String(response.status || '').toUpperCase();
+      if (!this.isTerminalFilledStatus(responseStatus)) {
+        this.registerActiveOpenOrder({
+          key: this.getOpenOrderKey(originalTrade),
+          trade: originalTrade,
+          orderId: response.orderID,
+          executionPrice,
+          shares: copyShares,
+          notional: copyNotional,
+        });
+      }
     }
 
     console.log('[Execution Success]', {

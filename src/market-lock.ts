@@ -21,6 +21,7 @@ const NO_LOCK_REASONS = new Set([
   'too_small',
   'market_outcome_map_missing',
   'signal_pending',
+  'market_order_already_open',
 ]);
 
 const STRATEGY_FILTER_SKIP_REASONS = new Set([
@@ -32,6 +33,7 @@ const STRATEGY_FILTER_SKIP_REASONS = new Set([
   'too_small',
   'market_outcome_map_missing',
   'signal_pending',
+  'market_order_already_open',
 ]);
 
 const SOFT_LOCK_REASONS = new Set([
