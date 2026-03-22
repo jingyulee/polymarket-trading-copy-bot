@@ -22,7 +22,7 @@ const DEFAULT_SKIP_LIMIT = 200;
 const SUPPORTED_COMMANDS = new Set(['/stats', '/simstats', '/livestats', '/open', '/recent', '/skips']);
 const SKIP_REASONS = [
   'stale_trade',
-  'market_locked',
+  'market_already_executed',
   'source_trade_usd_too_small',
   'non_crypto_market',
   'slippage_gap_too_high',

@@ -387,7 +387,7 @@ class PolymarketCopyBot {
       return { ...baseDecision, reason: 'best_bid_missing' };
     }
     if (marketLocked) {
-      return { ...baseDecision, reason: 'market_locked' };
+      return { ...baseDecision, reason: 'market_already_executed' };
     }
     if (bestBid < config.trading.minReplicableBestBid) {
       return { ...baseDecision, reason: 'best_bid_too_low' };
@@ -518,13 +518,18 @@ class PolymarketCopyBot {
       lockMs?: number | null;
     }
   ): void {
+    if (!marketLockKey) {
+      return;
+    }
+
     const lockedUntil = params.lockType === 'hard'
       ? Number.MAX_SAFE_INTEGER
       : Date.now() + Math.max(0, params.lockMs ?? config.trading.marketShortLockMs);
+    const lockTs = trade.timestamp || Date.now();
 
     if (params.lockType === 'hard') {
       this.marketLocks.add(marketLockKey);
-      persistMarketLock(marketLockKey, trade.timestamp || Date.now());
+      persistMarketLock(marketLockKey, lockTs);
     }
 
     this.marketLockStates.set(marketLockKey, {
@@ -532,6 +537,16 @@ class PolymarketCopyBot {
       lockType: params.lockType,
       reason: params.reason,
     });
+
+    if (params.lockType === 'hard') {
+      console.log('[Market Hard Lock Applied]', {
+        market: trade.market || marketLockKey,
+        tokenId: trade.tokenId || marketLockKey,
+        lockKey: marketLockKey,
+        ts: lockTs,
+      });
+      return;
+    }
 
     console.log('[Market Lock Applied]', {
       market: trade.market || marketLockKey,
@@ -568,14 +583,21 @@ class PolymarketCopyBot {
     trade: Trade,
     marketLockKey: string,
     now: number
-  ): 'market_locked' | 'market_short_locked' | 'market_retry_exhausted' | null {
+  ): 'market_already_executed' | 'market_short_locked' | 'market_retry_exhausted' | null {
     this.pruneMarketLockState(now);
 
     const activeLockState = this.marketLockStates.get(marketLockKey);
     if (activeLockState) {
-      const remainingMs = activeLockState.lockType === 'hard'
-        ? null
-        : Math.max(0, activeLockState.lockedUntil - now);
+      if (activeLockState.lockType === 'hard') {
+        console.log('[Market Hard Lock Skip]', {
+          market: trade.market || marketLockKey,
+          tokenId: trade.tokenId || marketLockKey,
+          lockKey: marketLockKey,
+        });
+        return 'market_already_executed';
+      }
+
+      const remainingMs = Math.max(0, activeLockState.lockedUntil - now);
       console.log('[Market Lock Skip]', {
         market: trade.market || marketLockKey,
         tokenId: trade.tokenId || marketLockKey,
@@ -583,7 +605,7 @@ class PolymarketCopyBot {
         reason: activeLockState.reason,
         remainingMs,
       });
-      return activeLockState.lockType === 'hard' ? 'market_locked' : 'market_short_locked';
+      return 'market_short_locked';
     }
 
     const retryState = this.getMarketRetryState(marketLockKey, now);
@@ -750,7 +772,9 @@ class PolymarketCopyBot {
       return;
     }
 
-    const marketLockSkipReason = this.getMarketLockSkipReason(trade, marketLockKey, now);
+    const marketLockSkipReason = marketLockKey
+      ? this.getMarketLockSkipReason(trade, marketLockKey, now)
+      : null;
     if (marketLockSkipReason) {
       this.handleTradeSkip(trade, {
         reason: marketLockSkipReason,
@@ -1013,7 +1037,7 @@ class PolymarketCopyBot {
 
     try {
       const result = await this.executor.executeCopyTrade(effectiveTrade, copyNotional);
-      this.handleSuccessfulExecution(trade, result, sourceAgeMs, marketLockKey, 'executed', false);
+      this.handleSuccessfulExecution(trade, result, sourceAgeMs, marketLockKey, 'executed', true);
       console.log('✅ Successfully copied trade');
       await sendTelegram(formatTradeMessage(trade, {
         mode: 'LIVE',

@@ -7,6 +7,7 @@ export interface MarketLockBehavior {
 }
 
 const NO_LOCK_REASONS = new Set([
+  'market_already_executed',
   'market_locked',
   'market_short_locked',
   'market_retry_exhausted',

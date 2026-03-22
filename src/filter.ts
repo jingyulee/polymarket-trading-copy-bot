@@ -45,14 +45,7 @@ export interface FilterContext {
 const HIGH_LIQUIDITY_SYMBOLS = new Set(['bitcoin', 'ethereum', 'solana']);
 
 export function getMarketLockKey(trade: FilterTrade): string {
-  const outcome = String(trade.outcomeName || trade.outcome || '').trim().toUpperCase();
-  return (
-    [trade.conditionId, outcome].filter(Boolean).join('|') ||
-    trade.marketSlug ||
-    trade.market ||
-    trade.tokenId ||
-    'unknown-market'
-  );
+  return String(trade.conditionId || '').trim();
 }
 
 export function applyFilters(trade: FilterTrade, context: FilterContext = {}): FilterResult {
@@ -79,8 +72,8 @@ export function applyFilters(trade: FilterTrade, context: FilterContext = {}): F
   }
 
   const marketLockKey = getMarketLockKey(trade);
-  if (config.trading.oneTradePerMarket && context.marketLocks?.has(marketLockKey)) {
-    return { pass: false, reason: 'market_locked' };
+  if (config.trading.oneTradePerMarket && marketLockKey && context.marketLocks?.has(marketLockKey)) {
+    return { pass: false, reason: 'market_already_executed' };
   }
 
   if (Number.isFinite(context.bestAsk)) {
