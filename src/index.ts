@@ -60,6 +60,14 @@ interface MarketRetryState {
 
 class PolymarketCopyBot {
   private readonly HARD_MARKET_LOCK_TTL_MS = 5 * 60 * 1000;
+  private readonly EXECUTION_READY_GATE_BYPASS_REASONS = new Set([
+    'not_high_liquidity_symbol',
+    'orderbook_liquidity_too_low',
+    'asks_depth_too_low',
+    'spread_too_wide',
+    'price_deviation_too_high',
+    'slippage_gap_too_high',
+  ]);
   private monitor: TradeMonitor;
   private wsMonitor?: WebSocketMonitor;
   private executor: TradeExecutor;
@@ -942,8 +950,8 @@ class PolymarketCopyBot {
       now,
     });
 
-    const bypassLiquidityGate = lightweightFilterResult.reason === 'not_high_liquidity_symbol' && liquiditySymbolCheck.allowed;
-    if (!lightweightFilterResult.pass && !bypassLiquidityGate) {
+    const bypassLightweightExecutionGate = this.EXECUTION_READY_GATE_BYPASS_REASONS.has(lightweightFilterResult.reason);
+    if (!lightweightFilterResult.pass && !bypassLightweightExecutionGate) {
       this.handleTradeSkip(trade, {
         reason: lightweightFilterResult.reason,
         sourceAgeMs,
@@ -953,8 +961,13 @@ class PolymarketCopyBot {
       this.printStats();
       return;
     }
-    if (bypassLiquidityGate) {
-      console.log('ℹ️  Bypassing lightweight liquidity gate for configured crypto symbol');
+    if (bypassLightweightExecutionGate) {
+      console.log('[Execution Gate Bypassed In MVP]', {
+        market: effectiveTrade.market,
+        tokenId: effectiveTrade.tokenId,
+        skippedGate: lightweightFilterResult.reason,
+        reason: 'execution_ready_path',
+      });
     }
 
     if (this.wsMonitor) {
@@ -1004,7 +1017,8 @@ class PolymarketCopyBot {
     });
     const noLiquidityBothSides = effectiveFilterResult.reason === 'no_asks_in_orderbook' && asksDepth === 0 && (bestBid == null || bidsDepth === 0);
 
-    if (!effectiveFilterResult.pass && !bypassNoAsksFilter) {
+    const bypassExecutionReadyFilterGate = this.EXECUTION_READY_GATE_BYPASS_REASONS.has(effectiveFilterResult.reason);
+    if (!effectiveFilterResult.pass && !bypassNoAsksFilter && !bypassExecutionReadyFilterGate) {
       const resolvedReason = noLiquidityBothSides ? 'no_liquidity_both_sides' : effectiveFilterResult.reason;
       this.handleTradeSkip(trade, {
         reason: resolvedReason,
@@ -1021,6 +1035,14 @@ class PolymarketCopyBot {
       });
       this.printStats();
       return;
+    }
+    if (bypassExecutionReadyFilterGate) {
+      console.log('[Execution Gate Bypassed In MVP]', {
+        market: effectiveTrade.market,
+        tokenId: effectiveTrade.tokenId,
+        skippedGate: effectiveFilterResult.reason,
+        reason: 'execution_ready_path',
+      });
     }
     if (bypassNoAsksFilter) {
       console.log('ℹ️  Bypassing no_asks_in_orderbook filter so fallback execution can handle the trade');
