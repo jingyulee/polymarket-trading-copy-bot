@@ -2084,15 +2084,16 @@ export class TradeExecutor {
   ): Promise<CopyExecutionResult> {
     await this.validateBalance(copyNotional, originalTrade.tokenId);
 
-    const baseMakerPrice = bestBid != null && bestBid > 0
-      ? bestBid
-      : Number(originalTrade.price);
-    const rawMakerPrice = Math.min(baseMakerPrice, Number(originalTrade.price));
+    const sourcePrice = Number(originalTrade.price);
+    const rawMakerPrice = Math.max(0.01, sourcePrice - 0.001);
     if (!Number.isFinite(rawMakerPrice) || rawMakerPrice <= 0) {
       throw new Error('maker_submit_failed');
     }
 
     const makerPrice = await this.validatePrice(rawMakerPrice, originalTrade.tokenId);
+    if (Math.abs(makerPrice - sourcePrice) > 0.002) {
+      throw new Error('invalid_maker_price_gap');
+    }
     const copyShares = this.calculateSharesFromNotional(copyNotional, makerPrice);
     const orderOpts = await this.getOrderOptions(originalTrade.tokenId);
     const feeRateBps = await this.getFeeRateBps(originalTrade.tokenId);
@@ -2105,7 +2106,7 @@ export class TradeExecutor {
       tokenId: originalTrade.tokenId,
       bestAsk,
       bestBid,
-      sourcePrice: originalTrade.price,
+      sourcePrice,
       makerPrice,
       ttlMs,
       mustMatchSourceSide: true,
